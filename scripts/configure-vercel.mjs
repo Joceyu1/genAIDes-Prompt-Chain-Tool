@@ -11,6 +11,7 @@ const repository =
   process.env.GITHUB_REPOSITORY || "Joceyu1/genAIDes-Prompt-Chain-Tool";
 const scope = process.env.VERCEL_SCOPE || "jocelyn13";
 let teamId;
+let scopedProject;
 if (!/^[a-z0-9][a-z0-9-]{0,99}$/.test(name))
   throw new Error("Invalid VERCEL_PROJECT_NAME.");
 if (!/^[\w.-]+\/[\w.-]+$/.test(repository))
@@ -110,6 +111,36 @@ async function api(path, method = "GET", body, unscoped = false) {
 }
 
 async function resolveScope() {
+  // Project-scoped tokens can resolve the exact slug-qualified project without
+  // requiring account-wide access to enumerate teams or personal profiles.
+  try {
+    const exact = await api(
+      `/v9/projects/${encodeURIComponent(name)}?slug=${encodeURIComponent(scope)}`,
+      "GET",
+      undefined,
+      true,
+    );
+    if (
+      exact.name !== name ||
+      typeof exact.accountId !== "string" ||
+      !exact.accountId
+    )
+      throw new Error(
+        "The exact-scope project response has an unexpected name or missing account ID. No project changes made.",
+      );
+    if (
+      process.env.VERCEL_TEAM_ID &&
+      exact.accountId !== process.env.VERCEL_TEAM_ID
+    )
+      throw new Error(
+        "VERCEL_TEAM_ID does not match the exact-scope project's account ID. No project changes made.",
+      );
+    scopedProject = exact;
+    teamId = exact.accountId.startsWith("team_") ? exact.accountId : undefined;
+    return;
+  } catch (error) {
+    if (![403, 404].includes(error.status)) throw error;
+  }
   if (process.env.VERCEL_TEAM_ID) {
     const team = await api(
       `/v2/teams/${encodeURIComponent(process.env.VERCEL_TEAM_ID)}`,
@@ -167,7 +198,8 @@ console.log(
 );
 let project;
 try {
-  project = await api(`/v9/projects/${encodeURIComponent(name)}`);
+  project =
+    scopedProject || (await api(`/v9/projects/${encodeURIComponent(name)}`));
 } catch (error) {
   if (error.status !== 404) throw error;
   if (!create)
@@ -263,6 +295,7 @@ if (deploy) {
 
 await api(`/v9/projects/${encodeURIComponent(project.id)}`, "PATCH", {
   framework: "nextjs",
+  nodeVersion: "24.x",
   ssoProtection: null,
   passwordProtection: null,
   trustedIps: null,

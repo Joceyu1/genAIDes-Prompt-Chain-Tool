@@ -34,6 +34,16 @@ async function run({ overrides = {}, args = [], responses, expectError }) {
       method: options.method,
       body: options.body ? JSON.parse(options.body) : undefined,
     });
+    // Preserve fallback fixtures while separately testing scoped-token lookup.
+    if (
+      url.pathname === "/v9/projects/genaides-prompt-chain-tool" &&
+      url.searchParams.get("slug") === "jocelyn13" &&
+      responses[0]?.path !== url.pathname
+    ) {
+      return new Response(JSON.stringify({ error: { code: "not_found" } }), {
+        status: 404,
+      });
+    }
     const next = responses.shift();
     assert.ok(next, `Unexpected request ${url.pathname}`);
     assert.equal(url.pathname, next.path);
@@ -123,6 +133,7 @@ const protectionCalls = await run({
 const mutation = protectionCalls.find((call) => call.method === "PATCH");
 assert.deepEqual(mutation.body, {
   framework: "nextjs",
+  nodeVersion: "24.x",
   ssoProtection: null,
   passwordProtection: null,
   trustedIps: null,
@@ -239,6 +250,40 @@ await run({
   responses: [],
   expectError: /must be an HTTPS/,
 });
+const scopedCalls = await run({
+  responses: [
+    { path: "/v9/projects/genaides-prompt-chain-tool", body: project },
+    { path: "/v9/projects/prj_test", body: project },
+    { path: "/v9/projects/prj_test", body: project },
+  ],
+});
+assert.equal(scopedCalls[0].query.get("slug"), "jocelyn13");
+assert.ok(
+  !scopedCalls.some(
+    (call) => call.path.includes("/teams") || call.path === "/v2/user",
+  ),
+);
+assert.equal(scopedCalls.at(-1).query.get("teamId"), "team_test");
+assert.equal(
+  scopedCalls.find((call) => call.method === "PATCH").body.nodeVersion,
+  "24.x",
+);
+await run({
+  responses: [
+    {
+      path: "/v9/projects/genaides-prompt-chain-tool",
+      body: { ...project, name: "different-project" },
+    },
+  ],
+  expectError: /unexpected name/,
+});
+await run({
+  overrides: { VERCEL_TEAM_ID: "team_other" },
+  responses: [
+    { path: "/v9/projects/genaides-prompt-chain-tool", body: project },
+  ],
+  expectError: /does not match the exact-scope/,
+});
 console.log(
-  "14 offline deployment checks passed: exact scope, missing project, mismatched scope/repository, protection removal, production variable names, migration prerequisite, deployment payload, and public-only Supabase sync (rejecting service secrets/proxy placeholders).",
+  "17 offline deployment checks passed: exact scope, scoped tokens, Node.js version, missing project, mismatched scope/repository, protection removal, production variable names, migration prerequisite, deployment payload, and public-only Supabase sync.",
 );
