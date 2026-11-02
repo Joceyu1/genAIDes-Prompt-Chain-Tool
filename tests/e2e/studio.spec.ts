@@ -426,3 +426,42 @@ test("account signout returns to the private sign-in screen", async ({
   ).toBeVisible();
   expect(state.authenticated).toBe(false);
 });
+
+test("Google sign-in starts without requiring a password", async ({ page }) => {
+  await mockApi(page, { authenticated: false });
+  await page.route("**/api/auth/google", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: "https://example.supabase.co/auth/v1/authorize?provider=google",
+      }),
+    }),
+  );
+  await page.route("https://example.supabase.co/auth/v1/authorize**", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "text/html",
+      body: "<h1>Google authorization handoff</h1>",
+    }),
+  );
+  await page.goto("/");
+  await page
+    .getByRole("button", { name: "Continue with Google", exact: true })
+    .click();
+  await expect(page).toHaveURL(/example.supabase.co\/auth\/v1\/authorize/);
+});
+
+test("OAuth failures are actionable and never expose callback codes", async ({
+  page,
+}) => {
+  await mockApi(page, { authenticated: false });
+  await page.goto("/?auth_error=profile_unavailable");
+  await expect(page.locator(".auth-error")).toContainText(
+    "administrator profile could not be verified",
+  );
+  await expect(page).toHaveURL("http://localhost:3000/");
+  await expect(
+    page.getByRole("button", { name: "Continue with Google", exact: true }),
+  ).toBeVisible();
+});

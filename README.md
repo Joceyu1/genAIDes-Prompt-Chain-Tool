@@ -47,7 +47,17 @@ set is_superadmin = true
 where id = '<existing-auth-user-uuid>';
 ```
 
-If the intended user has no profile row, create one through your existing profile provisioning process first, including any other fields your project requires. Do not grant this role through a public signup or client-side form. The sign-in form uses existing Supabase email/password accounts; no public registration is exposed.
+If the intended user has no profile row, create one through your existing profile provisioning process first, including any other fields your project requires. Do not grant this role through a public signup or client-side form. Sign-in supports existing Supabase email/password and Google accounts; no public registration form is exposed. Both paths require the same verified superadmin profile.
+
+### Google sign-in
+
+Enable Google in Supabase Authentication → Sign In / Providers. Under Authentication → URL Configuration, add this exact redirect URL while preserving the existing project's URLs and Site URL:
+
+```text
+https://genaides-prompt-chain-tool.vercel.app/auth/callback
+```
+
+For local development, also allow `http://localhost:3000/auth/callback`. Preview deployments require their own allowed callback URLs. Google sign-in uses PKCE with a cookie verifier, exchanges the authorization code server-side, and checks `profiles.is_superadmin` before returning to the workspace. It never accepts arbitrary callback return URLs. An expired exchange, cancelled login, or profile-access failure returns to sign-in with a specific error. A Google-only account does not automatically have an email/password credential.
 
 ## Generation
 

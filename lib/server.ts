@@ -43,19 +43,29 @@ export async function requireAdmin() {
     error,
   } = await db.auth.getUser();
   if (error || !user) throw new ApiError(401, "Sign in to continue.");
+  await verifySuperadmin(db, user.id);
+  return { db, user };
+}
+export async function verifySuperadmin(
+  db: Awaited<ReturnType<typeof supabaseServer>>,
+  userId: string,
+) {
   const { data: profile, error: profileError } = await db
     .from("profiles")
     .select("is_superadmin")
-    .eq("id", user.id)
+    .eq("id", userId)
     .maybeSingle();
-  if (profileError)
+  if (profileError) {
+    console.error("Administrator profile verification failed", {
+      code: profileError.code,
+    });
     throw new ApiError(
       503,
-      "Your administrator profile could not be verified.",
+      "Your login succeeded, but your administrator profile could not be verified. The project administrator needs to check the profiles table and its access policies.",
     );
+  }
   if (profile?.is_superadmin !== true)
     throw new ApiError(403, "This workspace is available to superadmins only.");
-  return { db, user };
 }
 export const json = (value: unknown, status = 200) =>
   NextResponse.json(value, {

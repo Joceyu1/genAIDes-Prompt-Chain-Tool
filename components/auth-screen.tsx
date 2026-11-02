@@ -1,6 +1,6 @@
 "use client";
 
-import { useId, useState, type FormEvent } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
 import {
   AlignLeft,
   ArrowDown,
@@ -27,11 +27,65 @@ export function AuthScreen({ onAuthenticated, initialError }: AuthScreenProps) {
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [isGoogleSubmitting, setIsGoogleSubmitting] = useState(false);
   const [error, setError] = useState("");
+  const busy = isSubmitting || isGoogleSubmitting;
+
+  useEffect(() => {
+    const url = new URL(window.location.href);
+    const code = url.searchParams.get("auth_error");
+    const messages: Record<string, string> = {
+      oauth_cancelled:
+        "Google sign-in was cancelled or did not complete. Please try again.",
+      oauth_session:
+        "Your sign-in link expired or was opened in a different browser. Start Google sign-in again from this page.",
+      superadmin_required:
+        "Your Google account signed in, but this workspace requires an existing superadmin profile.",
+      profile_unavailable:
+        "Your Google account signed in, but the administrator profile could not be verified. The project administrator needs to check the profiles table and its access policies.",
+      oauth_unavailable:
+        "The sign-in service is unavailable. Please try again shortly.",
+    };
+    if (code && messages[code]) setError(messages[code]);
+    if (code) {
+      url.searchParams.delete("auth_error");
+      window.history.replaceState(
+        null,
+        "",
+        url.pathname + url.search + url.hash,
+      );
+    }
+  }, []);
+
+  async function signInWithGoogle() {
+    if (busy) return;
+    setIsGoogleSubmitting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/auth/google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || typeof data.url !== "string")
+        throw new Error(
+          data.error ||
+            "Google sign-in could not be started. Please try again.",
+        );
+      window.location.assign(data.url);
+    } catch (cause) {
+      setError(
+        cause instanceof Error
+          ? cause.message
+          : "Unable to connect. Please try again.",
+      );
+      setIsGoogleSubmitting(false);
+    }
+  }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (isSubmitting) return;
+    if (busy) return;
     setIsSubmitting(true);
     setError("");
     try {
@@ -173,6 +227,51 @@ export function AuthScreen({ onAuthenticated, initialError }: AuthScreenProps) {
               {initialError}
             </div>
           )}
+          {error && (
+            <p className="auth-error" role="alert">
+              {error}
+            </p>
+          )}
+          <button
+            className="auth-google"
+            type="button"
+            disabled={busy}
+            onClick={signInWithGoogle}
+          >
+            {isGoogleSubmitting ? (
+              <LoaderCircle className="auth-spinner" size={18} />
+            ) : (
+              <svg
+                width="18"
+                height="18"
+                viewBox="0 0 48 48"
+                aria-hidden="true"
+              >
+                <path
+                  fill="#4285F4"
+                  d="M43.6 20.5H24v8h11.3C33.8 33.1 30 36 24 36a12 12 0 1 1 8.5-20.5l5.7-5.7A20 20 0 1 0 44 24c0-1.2-.1-2.4-.4-3.5Z"
+                />
+                <path
+                  fill="#34A853"
+                  d="M6.3 33.2A20 20 0 0 0 24 44c5.5 0 10.1-1.8 13.5-4.9l-6.1-4.7A12 12 0 0 1 13 29.6Z"
+                />
+                <path
+                  fill="#FBBC05"
+                  d="M6.3 14.8a20 20 0 0 0 0 18.4l6.7-5.2a12 12 0 0 1 0-8Z"
+                />
+                <path
+                  fill="#EA4335"
+                  d="M24 12c3.3 0 6.2 1.2 8.5 3.5l5.7-5.7A20 20 0 0 0 6.3 14.8l6.7 5.2A12 12 0 0 1 24 12Z"
+                />
+              </svg>
+            )}
+            {isGoogleSubmitting ? "Opening Google…" : "Continue with Google"}
+          </button>
+          <div className="auth-divider">
+            <span />
+            or sign in with email
+            <span />
+          </div>
           <form className="auth-form" onSubmit={handleSubmit}>
             <div className="auth-field">
               <label htmlFor={emailId}>Email address</label>
@@ -185,7 +284,7 @@ export function AuthScreen({ onAuthenticated, initialError }: AuthScreenProps) {
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 required
-                disabled={isSubmitting}
+                disabled={busy}
               />
             </div>
             <div className="auth-field">
@@ -200,7 +299,7 @@ export function AuthScreen({ onAuthenticated, initialError }: AuthScreenProps) {
                   value={password}
                   onChange={(event) => setPassword(event.target.value)}
                   required
-                  disabled={isSubmitting}
+                  disabled={busy}
                 />
                 <button
                   className="auth-password-toggle"
@@ -213,16 +312,7 @@ export function AuthScreen({ onAuthenticated, initialError }: AuthScreenProps) {
                 </button>
               </div>
             </div>
-            {error && (
-              <p className="auth-error" role="alert">
-                {error}
-              </p>
-            )}
-            <button
-              className="auth-submit"
-              type="submit"
-              disabled={isSubmitting}
-            >
+            <button className="auth-submit" type="submit" disabled={busy}>
               <span>
                 {isSubmitting ? "Signing in…" : "Sign in to Chainlab"}
               </span>
