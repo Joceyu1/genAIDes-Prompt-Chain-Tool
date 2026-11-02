@@ -1,0 +1,268 @@
+-- Prompt chain administration. Run once through Supabase migrations or the SQL editor.
+-- Existing profile rows and role assignments are preserved. This migration never
+-- grants superadmin to a user; do that explicitly through a trusted SQL session.
+begin;
+
+create table if not exists public.profiles (
+  id uuid primary key references auth.users(id) on delete cascade,
+  is_superadmin boolean not null default false
+);
+alter table public.profiles add column if not exists is_superadmin boolean not null default false;
+alter table public.profiles enable row level security;
+
+-- This guard applies even if an existing application's profile policies permit
+-- users to update their own rows. Only a trusted database session/service role
+-- can assign the privileged flag. Other profile fields remain unaffected.
+create or replace function public.guard_prompt_chain_superadmin_role()
+returns trigger
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+begin
+  if (tg_op = 'INSERT' and new.is_superadmin is true)
+     or (tg_op = 'UPDATE' and new.is_superadmin is distinct from old.is_superadmin) then
+    if current_user not in ('postgres', 'supabase_admin', 'service_role')
+       and coalesce(auth.role(), '') <> 'service_role' then
+      raise exception 'Superadmin assignments require a trusted database administrator'
+        using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+drop trigger if exists guard_prompt_chain_superadmin_role on public.profiles;
+create trigger guard_prompt_chain_superadmin_role
+  before insert or update on public.profiles
+  for each row execute function public.guard_prompt_chain_superadmin_role();
+
+create or replace function public.is_prompt_chain_superadmin()
+returns boolean
+language sql
+stable
+security definer
+set search_path = ''
+as $$
+  select exists (
+    select 1 from public.profiles
+    where id = (select auth.uid()) and is_superadmin is true
+  );
+$$;
+revoke all on function public.is_prompt_chain_superadmin() from public;
+grant execute on function public.is_prompt_chain_superadmin() to authenticated, anon;
+
+-- The API checks the authenticated user's own profile, without a service key.
+drop policy if exists prompt_chain_read_own_profile on public.profiles;
+create policy prompt_chain_read_own_profile on public.profiles
+  for select to authenticated using (id = (select auth.uid()));
+grant select (id, is_superadmin) on public.profiles to authenticated;
+
+create table if not exists public.prompt_chains (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(btrim(name)) between 1 and 120),
+  description text not null default '' check (char_length(description) <= 2000),
+  status text not null default 'draft' check (status in ('draft', 'active')),
+  created_by uuid default auth.uid() references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
+);
+create table if not exists public.prompt_chain_steps (
+  id uuid primary key default gen_random_uuid(),
+  chain_id uuid not null references public.prompt_chains(id) on delete cascade,
+  name text not null check (char_length(btrim(name)) between 1 and 120),
+  prompt text not null check (char_length(btrim(prompt)) between 1 and 12000),
+  kind text not null default 'text' check (kind in ('text', 'image')),
+  model text not null,
+  position integer not null check (position >= 0),
+  created_at timestamptz not null default now(),
+  constraint prompt_chain_steps_chain_position_unique unique (chain_id, position)
+    deferrable initially immediate,
+  constraint prompt_chain_steps_supported_model check (
+    (kind = 'text' and model in ('gpt-4.1-mini', 'gpt-4.1', 'gpt-4o-mini'))
+    or (kind = 'image' and model = 'gpt-image-1')
+  )
+);
+create table if not exists public.prompt_chain_runs (
+  id uuid primary key default gen_random_uuid(),
+  chain_id uuid not null references public.prompt_chains(id) on delete cascade,
+  status text not null default 'running' check (status in ('running', 'completed', 'failed')),
+  input text not null default '' check (char_length(input) <= 16000),
+  outputs jsonb not null default '[]'::jsonb check (jsonb_typeof(outputs) = 'array'),
+  error text,
+  created_by uuid default auth.uid() references auth.users(id) on delete set null,
+  created_at timestamptz not null default now()
+);
+create index if not exists prompt_chains_updated_at_idx on public.prompt_chains(updated_at desc);
+create index if not exists prompt_chain_runs_chain_created_idx on public.prompt_chain_runs(chain_id, created_at desc);
+
+alter table public.prompt_chains enable row level security;
+alter table public.prompt_chain_steps enable row level security;
+alter table public.prompt_chain_runs enable row level security;
+
+create policy prompt_chains_superadmin on public.prompt_chains
+  for all to authenticated
+  using ((select public.is_prompt_chain_superadmin()))
+  with check ((select public.is_prompt_chain_superadmin()));
+create policy prompt_chain_steps_superadmin on public.prompt_chain_steps
+  for all to authenticated
+  using ((select public.is_prompt_chain_superadmin()))
+  with check ((select public.is_prompt_chain_superadmin()));
+create policy prompt_chain_runs_superadmin on public.prompt_chain_runs
+  for all to authenticated
+  using ((select public.is_prompt_chain_superadmin()))
+  with check ((select public.is_prompt_chain_superadmin()));
+-- Fail closed even if these names already existed with permissive policies.
+create policy prompt_chains_superadmin_guard on public.prompt_chains
+  as restrictive for all to public
+  using ((select public.is_prompt_chain_superadmin()))
+  with check ((select public.is_prompt_chain_superadmin()));
+create policy prompt_chain_steps_superadmin_guard on public.prompt_chain_steps
+  as restrictive for all to public
+  using ((select public.is_prompt_chain_superadmin()))
+  with check ((select public.is_prompt_chain_superadmin()));
+create policy prompt_chain_runs_superadmin_guard on public.prompt_chain_runs
+  as restrictive for all to public
+  using ((select public.is_prompt_chain_superadmin()))
+  with check ((select public.is_prompt_chain_superadmin()));
+grant select, insert, update, delete on public.prompt_chains, public.prompt_chain_steps, public.prompt_chain_runs to authenticated;
+
+create or replace function public.touch_prompt_chain_updated_at()
+returns trigger
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+begin
+  new.updated_at := now();
+  return new;
+end;
+$$;
+create trigger prompt_chains_updated_at before update on public.prompt_chains
+  for each row execute function public.touch_prompt_chain_updated_at();
+
+-- These RPCs serialize structural changes on the parent row. Reordering checks
+-- that the supplied IDs are exactly the current step set, avoiding silent loss.
+create or replace function public.append_chain_step(
+  p_chain_id uuid, p_name text, p_prompt text, p_kind text, p_model text
+)
+returns public.prompt_chain_steps
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+declare
+  v_step public.prompt_chain_steps;
+  v_position integer;
+begin
+  if not public.is_prompt_chain_superadmin() then
+    raise exception 'Superadmin access required' using errcode = '42501';
+  end if;
+  perform 1 from public.prompt_chains where id = p_chain_id for update;
+  if not found then
+    raise exception 'Prompt chain not found' using errcode = 'P0002';
+  end if;
+  select coalesce(max(position), -1) + 1 into v_position
+    from public.prompt_chain_steps where chain_id = p_chain_id;
+  if (select count(*) from public.prompt_chain_steps where chain_id = p_chain_id) >= 10 then
+    raise exception 'A prompt chain can contain at most 10 steps' using errcode = '22023';
+  end if;
+  insert into public.prompt_chain_steps(chain_id, name, prompt, kind, model, position)
+    values (p_chain_id, p_name, p_prompt, p_kind, p_model, v_position)
+    returning * into v_step;
+  update public.prompt_chains set updated_at = now() where id = p_chain_id;
+  return v_step;
+end;
+$$;
+
+create or replace function public.delete_chain_step(p_chain_id uuid, p_step_id uuid)
+returns void
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+declare
+  v_position integer;
+begin
+  if not public.is_prompt_chain_superadmin() then
+    raise exception 'Superadmin access required' using errcode = '42501';
+  end if;
+  perform 1 from public.prompt_chains where id = p_chain_id for update;
+  if not found then
+    raise exception 'Prompt chain not found' using errcode = 'P0002';
+  end if;
+  delete from public.prompt_chain_steps where id = p_step_id and chain_id = p_chain_id
+    returning position into v_position;
+  if not found then
+    raise exception 'Prompt chain step not found' using errcode = 'P0002';
+  end if;
+  set constraints prompt_chain_steps_chain_position_unique deferred;
+  update public.prompt_chain_steps set position = position - 1
+    where chain_id = p_chain_id and position > v_position;
+  update public.prompt_chains set updated_at = now() where id = p_chain_id;
+end;
+$$;
+
+create or replace function public.reorder_chain_steps(p_chain_id uuid, p_step_ids uuid[])
+returns setof public.prompt_chain_steps
+language plpgsql
+security invoker
+set search_path = public, pg_temp
+as $$
+declare
+  v_count integer;
+begin
+  if not public.is_prompt_chain_superadmin() then
+    raise exception 'Superadmin access required' using errcode = '42501';
+  end if;
+  perform 1 from public.prompt_chains where id = p_chain_id for update;
+  if not found then
+    raise exception 'Prompt chain not found' using errcode = 'P0002';
+  end if;
+  select count(*) into v_count from public.prompt_chain_steps where chain_id = p_chain_id;
+  if p_step_ids is null
+     or cardinality(p_step_ids) <> v_count
+     or (select count(distinct step_id) from unnest(p_step_ids) as supplied(step_id)) <> v_count
+     or exists (
+       select 1 from unnest(p_step_ids) as supplied(step_id)
+       where not exists (
+         select 1 from public.prompt_chain_steps s
+         where s.id = supplied.step_id and s.chain_id = p_chain_id
+       )
+     ) then
+    raise exception 'Step IDs must contain every current step exactly once' using errcode = '22023';
+  end if;
+  set constraints prompt_chain_steps_chain_position_unique deferred;
+  update public.prompt_chain_steps s
+    set position = supplied.ordinality - 1
+    from unnest(p_step_ids) with ordinality as supplied(step_id, ordinality)
+    where s.id = supplied.step_id and s.chain_id = p_chain_id;
+  update public.prompt_chains set updated_at = now() where id = p_chain_id;
+  return query select * from public.prompt_chain_steps where chain_id = p_chain_id order by position;
+end;
+$$;
+
+revoke all on function public.append_chain_step(uuid, text, text, text, text) from public;
+revoke all on function public.delete_chain_step(uuid, uuid) from public;
+revoke all on function public.reorder_chain_steps(uuid, uuid[]) from public;
+grant execute on function public.append_chain_step(uuid, text, text, text, text) to authenticated;
+grant execute on function public.delete_chain_step(uuid, uuid) to authenticated;
+grant execute on function public.reorder_chain_steps(uuid, uuid[]) to authenticated;
+
+-- Generated images remain private. The API issues short-lived signed URLs only
+-- after verifying the current superadmin session. No public bucket is created.
+insert into storage.buckets(id, name, public, file_size_limit, allowed_mime_types)
+  values ('prompt-chain-media', 'prompt-chain-media', false, 20971520, array['image/png', 'image/jpeg', 'image/webp']);
+-- A pre-existing bucket with this dedicated name aborts the transaction rather
+-- than changing another application's storage configuration.
+-- Restrictive guard also protects this bucket when an older project has broad
+-- permissive storage policies; it leaves other buckets' authorization unchanged.
+create policy prompt_chain_media_guard on storage.objects
+  as restrictive for all to public
+  using (bucket_id <> 'prompt-chain-media' or (select public.is_prompt_chain_superadmin()))
+  with check (bucket_id <> 'prompt-chain-media' or (select public.is_prompt_chain_superadmin()));
+create policy prompt_chain_media_superadmin on storage.objects
+  for all to authenticated
+  using (bucket_id = 'prompt-chain-media' and (select public.is_prompt_chain_superadmin()))
+  with check (bucket_id = 'prompt-chain-media' and (select public.is_prompt_chain_superadmin()));
+
+commit;
