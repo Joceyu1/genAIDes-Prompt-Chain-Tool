@@ -72,9 +72,23 @@ export const json = (value: unknown, status = 200) =>
     status,
     headers: { "Cache-Control": "no-store" },
   });
+export function requestOrigin(request: Request) {
+  const url = new URL(request.url);
+  // Next's bind address can be 0.0.0.0 in local production mode. Use the
+  // browser-controlled Host header, never an untrusted forwarded-host header.
+  const host = request.headers.get("host");
+  if (!host) return url.origin;
+  if (/[\s\\/\@,?#]/.test(host))
+    throw new ApiError(400, "Invalid request host.");
+  try {
+    return new URL(`${url.protocol}//${host}`).origin;
+  } catch {
+    throw new ApiError(400, "Invalid request host.");
+  }
+}
 export function checkOrigin(request: Request) {
   const origin = request.headers.get("origin");
-  if (!origin || origin !== new URL(request.url).origin)
+  if (!origin || origin !== requestOrigin(request))
     throw new ApiError(403, "This request must come from this application.");
 }
 export async function readBody<T>(

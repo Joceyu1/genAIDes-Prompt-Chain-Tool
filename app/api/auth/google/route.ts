@@ -1,11 +1,17 @@
-import { ApiError, json, route, supabaseServer } from "@/lib/server";
+import {
+  ApiError,
+  json,
+  requestOrigin,
+  route,
+  supabaseServer,
+} from "@/lib/server";
 
 export const POST = route(async (request) => {
   const db = await supabaseServer();
   const { data, error } = await db.auth.signInWithOAuth({
     provider: "google",
     options: {
-      redirectTo: new URL("/auth/callback", request.url).toString(),
+      redirectTo: new URL("/auth/callback", requestOrigin(request)).toString(),
       skipBrowserRedirect: true,
       queryParams: { prompt: "select_account" },
     },

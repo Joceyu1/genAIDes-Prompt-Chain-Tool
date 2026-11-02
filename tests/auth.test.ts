@@ -11,6 +11,7 @@ import {
   parseId,
   readBody,
   requireAdmin,
+  requestOrigin,
   route,
 } from "../lib/server";
 import { chainSchema } from "../lib/validation";
@@ -90,6 +91,35 @@ describe("superadmin authorization", () => {
   });
 });
 describe("request boundaries", () => {
+  it("uses the actual request host when Next binds to 0.0.0.0", () => {
+    const request = new Request("http://0.0.0.0:3001/api/auth/google", {
+      method: "POST",
+      headers: { host: "localhost:3001", origin: "http://localhost:3001" },
+    });
+    expect(requestOrigin(request)).toBe("http://localhost:3001");
+    expect(() => checkOrigin(request)).not.toThrow();
+  });
+  it("does not trust spoofed forwarded hosts or malformed host values", () => {
+    expect(() =>
+      checkOrigin(
+        new Request("https://app.example/api/auth/google", {
+          method: "POST",
+          headers: {
+            host: "app.example",
+            origin: "https://attacker.example",
+            "x-forwarded-host": "attacker.example",
+          },
+        }),
+      ),
+    ).toThrow(ApiError);
+    expect(() =>
+      requestOrigin(
+        new Request("https://app.example/", {
+          headers: { host: "app.example@attacker.example" },
+        }),
+      ),
+    ).toThrow(ApiError);
+  });
   it("rejects missing and foreign origins on mutations", () => {
     expect(() =>
       checkOrigin(

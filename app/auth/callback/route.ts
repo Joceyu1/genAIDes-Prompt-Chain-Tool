@@ -1,11 +1,16 @@
 import { NextResponse } from "next/server";
-import { ApiError, supabaseServer, verifySuperadmin } from "@/lib/server";
+import {
+  ApiError,
+  requestOrigin,
+  supabaseServer,
+  verifySuperadmin,
+} from "@/lib/server";
 
 // PKCE binds the code to the verifier cookie created by /api/auth/google.
 // Never accept a user-supplied return URL or token from the callback fragment.
 export async function GET(request: Request) {
   const incoming = new URL(request.url);
-  const target = new URL("/", incoming.origin);
+  const target = new URL("/", requestOrigin(request));
   const failure = (code: string) => {
     target.searchParams.set("auth_error", code);
     const response = NextResponse.redirect(target, 303);
