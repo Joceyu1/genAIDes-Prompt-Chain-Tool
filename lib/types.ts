@@ -8,6 +8,11 @@ export type ChainStep = {
   model: string;
   position: number;
   created_at?: string;
+  updated_at?: string;
+  role?: string;
+  model_id?: string | null;
+  model_label?: string;
+  generation_ready?: boolean;
 };
 export type PromptChain = {
   id: string;
@@ -16,6 +21,7 @@ export type PromptChain = {
   status: "draft" | "active";
   created_at: string;
   updated_at: string;
+  source?: string;
   steps: ChainStep[];
 };
 export type RunOutput = {
