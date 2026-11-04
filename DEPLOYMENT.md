@@ -13,7 +13,7 @@ Never commit credentials to Git or paste them into chat. Do not put the Vercel d
 
 ## Prepare production
 
-1. For the linked project with existing assignment tables, apply only `supabase/repair-superadmin-access.sql` for the sign-in repair, then verify the existing chain-table schema and access rules. For a separate empty database, use `supabase/setup.sql` or the dated migrations; the guarded fresh setup aborts on existing app objects. The `chainlab_is_superadmin()` function checks only the authenticated user's own flag, preserving restrictive profile policies used by other applications. Existing accounts must have `profiles.id = auth.uid()` and `profiles.is_superadmin = true`; users cannot grant themselves that role.
+1. For this linked project with existing assignment tables, run `supabase/install-existing-chain-admin.sql` once in its Supabase SQL editor. It installs the current-user authorization check, scoped chain/step operations, model lookup, and private run history in one transaction. It validates an existing authorization-only repair or creates the role function if missing. Existing chain records, constraints, profile policies, and role assignments are preserved. Existing accounts must have `profiles.id = auth.uid()` and `profiles.is_superadmin = true`. Do not apply the older fresh-schema setup or all dated migration files to this project. Conflicting Chainlab objects abort the installer; after success, use reviewed incremental migrations.
 2. Configure these application environment variables in Vercel for Production and Preview:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`

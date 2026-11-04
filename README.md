@@ -10,7 +10,7 @@ A private prompt chain studio for superadmins. Built with Next.js, React, TypeSc
 - Reference `{{input}}`, `{{previous}}`, and earlier outputs such as `{{step.1}}` in prompts.
 - View each chain’s run history, partial results, text outputs, and private generated images.
 - Light, dark, and system themes, responsive layouts, and an image-to-captions example chain.
-- Server-side authorization and database RLS require an authenticated profile with `is_superadmin = true`. There is no demo or client-side permission bypass.
+- Server-side authorization and guarded database functions require an authenticated profile with `is_superadmin = true`. There is no demo or client-side permission bypass.
 
 ## Local development
 
@@ -27,33 +27,21 @@ The public Supabase project is `https://qrgjqpdvvbwmjpthpmlo.supabase.co`. Set t
 
 ## Database setup
 
-The linked shared project already has assignment chain tables. For the sign-in repair, run only [supabase/repair-superadmin-access.sql](supabase/repair-superadmin-access.sql) once in that project's SQL editor. It installs the current-user role function without adopting or changing existing chain tables, profile policies, or user data. It stops if that function already exists. Existing-schema installations also need their table columns and access rules checked before chain operations can be validated.
+The linked shared project already has assignment chain tables. Run [supabase/install-existing-chain-admin.sql](supabase/install-existing-chain-admin.sql) once in that project's SQL editor. This is the installer for the current application. It checks the existing schema, installs the current-user authorization function if missing, and adds scoped administration functions, step display settings, model lookup, and private run history. It preserves existing chain/step IDs, model assignments, constraints, profile policies, and records. It grants no account a new role.
 
-For a separate empty database, [supabase/setup.sql](supabase/setup.sql) combines the complete schema migrations into one guarded transaction and refuses to overwrite pre-existing app objects. It preserves profile rows, existing role values, and profile-read policies, adds the chain tables/functions, and prevents untrusted changes to `is_superadmin`. Existing `profiles.id` must match `auth.users.id`. An established migration workflow can instead apply the dated migrations in order. Do not use this fresh-schema script to replace the linked project's assignment tables.
+The installer uses one transaction and aborts on incompatible tables or conflicting Chainlab objects. If the earlier authorization-only repair is already installed, its definition and owner must pass the installer's checks; the function is not replaced. After a successful installation, use reviewed incremental migrations instead of rerunning the installer. Do not run every file in the migrations directory: the older `setup.sql` and `20261102000000_prompt_chains.sql` describe a different initial schema and are retained as historical references, not the current installation path.
 
 The API calls the no-argument `chainlab_is_superadmin()` function to check the authenticated user's own flag. This function returns only a boolean and is executable by authenticated users only. It uses a fixed search path and a trusted database owner so a separate application's restrictive domain policy cannot hide an already-approved superadmin flag. Existing policies such as `columbia_profiles_guard` continue to govern direct profile reads; the app does not remove or weaken them. No service-role credential is used by the application.
 
-Regenerate the combined SQL after editing its source migrations with `node scripts/build-supabase-setup.mjs`; add `--repair` to regenerate the authorization-only repair. Both modes support `--check` to detect a stale artifact.
+Regenerate the current installer with `node scripts/build-supabase-setup.mjs --existing`. Add `--check` to detect a stale artifact. The `--repair` mode generates the smaller authorization-only repair; it does not install chain editing or generation history.
 
 With `SUPABASE_ACCESS_TOKEN` supplied securely, the optional Management API helper inspects schema metadata without reading application rows:
 
 ```bash
 node --use-env-proxy scripts/configure-supabase.mjs
-# After inspecting compatibility:
-node --use-env-proxy scripts/configure-supabase.mjs --apply
 ```
 
-The helper targets this exact project and refuses incompatible profiles or pre-existing app objects. Its `--apply` mode is for initial schema setup and intentionally stops against the existing assignment tables. It does not automatically adopt or overwrite another application's tables, functions, policies, or storage bucket. After a successful initial migration, inspect rather than rerun `--apply`.
-
-The setup creates a private `prompt-chain-media` storage bucket and role checks. It never grants a user superadmin access. Use a trusted SQL session to explicitly grant an intended existing account access:
-
-```sql
-update public.profiles
-set is_superadmin = true
-where id = '<existing-auth-user-uuid>';
-```
-
-If the intended user has no profile row, create one through your existing profile provisioning process first, including any other fields your project requires. Do not grant this role through a public signup or client-side form. Sign-in supports existing Supabase email/password and Google accounts; no public registration form is exposed. Both paths require the same verified superadmin profile.
+The helper targets this exact project. Its legacy `--apply` mode intentionally stops against the existing assignment tables; use the current SQL installer above. The application uses the private `chainlab-generated-media` bucket and leaves existing storage buckets and policies unchanged. Sign-in supports existing Supabase email/password and Google accounts; no public registration form is exposed. Both paths require an existing profile whose ID matches the authenticated account and whose `is_superadmin` flag is true. Account provisioning and role assignment remain with the project's trusted administrator.
 
 ### Google sign-in
 
@@ -67,7 +55,9 @@ For local development, also allow `http://localhost:3000/auth/callback`. Preview
 
 ## Generation
 
-Text models: `gpt-4.1-mini`, `gpt-4.1`, and `gpt-4o-mini`. Image model: `gpt-image-1`. The account behind `AI_API_KEY` needs access to the selected model and available quota. Calls incur provider usage costs. Uploaded images can be analyzed by text steps; image steps create or edit images, which can feed subsequent steps.
+Editing follows the existing assignment limits: chain names up to 120 characters, descriptions and step templates up to 2,000 characters, and up to 1,000 step positions. Reordering preserves step IDs and the existing unique position constraint. A chain occupying all 1,000 positions needs one step removed before a nontrivial reorder.
+
+Text models: `gpt-4.1-mini`, `gpt-4.1`, and `gpt-4o-mini`. Image model: `gpt-image-1`. Existing registry assignments retain their UUIDs and roles. Models from other providers, inactive models, and unsupported model keys remain editable but cannot run through this OpenAI integration. A step without a registry assignment can use a supported workspace fallback model. The account behind `AI_API_KEY` needs access to the selected model and available quota. Calls incur provider usage costs. Uploaded images can be analyzed by text steps; image steps create or edit images, which can feed subsequent steps.
 
 Runs support up to 10 steps with a 250-second overall provider timeout. Vercel must permit a 300-second function duration; use an appropriate plan/runtime configuration. Runs execute synchronously: leave the page open while a run is processing. Text inputs are capped at 16,000 characters (the UI uses 12,000); browser uploads are capped at 2 MB to fit Vercel's request limits. Server requests additionally validate sizes and formats. Failed runs retain completed steps. History returns the latest 50 runs per chain. Signed image URLs expire after an hour; reload the history to renew them. This version supports text and still images, not audio or video.
 

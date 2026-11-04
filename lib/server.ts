@@ -128,15 +128,32 @@ export async function readBody<T>(
 export function dbError(
   error: { code?: string; message?: string } | null,
   fallback: string,
+  options: { foreignKeyMessage?: string } = {},
 ) {
   if (!error) return;
   if (error.code === "23505")
     throw new ApiError(
       409,
-      "This data changed while you were editing. Refresh and try again.",
+      error.message?.includes('"prompt_chains_name_key"')
+        ? "A chain with this name already exists."
+        : "This data changed while you were editing. Refresh and try again.",
     );
   if (error.code === "P0002")
     throw new ApiError(404, "This chain or step no longer exists.");
+  if (error.code === "23001" || error.code === "23503")
+    throw new ApiError(
+      409,
+      options.foreignKeyMessage ||
+        "A referenced record is missing or still in use. Refresh and try again.",
+    );
+  if (
+    error.code === "22023" &&
+    [
+      "Reordering 1000 occupied positions needs a free slot; remove a step first",
+      "This chain has reached the 1000-step position limit",
+    ].includes(error.message || "")
+  )
+    throw new ApiError(400, error.message!);
   if (error.code === "22023" || error.code === "23514")
     throw new ApiError(
       400,
@@ -144,6 +161,11 @@ export function dbError(
     );
   if (error.code === "42501")
     throw new ApiError(403, "You do not have access to this action.");
+  if (error.code === "PGRST202" || error.code === "42883")
+    throw new ApiError(
+      503,
+      "The Chainlab database setup is incomplete. Ask your administrator to apply the shared-database setup.",
+    );
   console.error(fallback, { code: error.code });
   throw new ApiError(500, fallback);
 }
@@ -177,13 +199,14 @@ export async function chainExists(
   db: Awaited<ReturnType<typeof supabaseServer>>,
   id: string,
 ) {
-  const { data, error } = await db
-    .from("prompt_chains")
-    .select("id")
-    .eq("id", id)
-    .maybeSingle();
+  const { data, error } = await db.rpc("chainlab_get_chain", { p_id: id });
   dbError(error, "Could not load this chain.");
-  if (!data) throw new ApiError(404, "This chain no longer exists.");
+  if (!data?.chain) throw new ApiError(404, "This chain no longer exists.");
+  if (data.chain.id !== id)
+    throw new ApiError(
+      503,
+      "The Chainlab database returned a different chain.",
+    );
 }
 export function parseId(value: string | undefined) {
   if (

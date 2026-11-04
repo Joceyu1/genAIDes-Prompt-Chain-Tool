@@ -170,6 +170,17 @@ describe("adapting the existing shared prompt chain tables", () => {
     });
   });
 
+  it("keeps an inactive assignment editable while disabling generation", () => {
+    expect(
+      adaptExistingStep(step, { model: { ...model, active: false } }),
+    ).toMatchObject({
+      model_id: model.id,
+      model: model.model,
+      model_label: model.label,
+      generation_ready: false,
+    });
+  });
+
   it.each([
     { settings: undefined, kind: "text", model: "gpt-4.1-mini" },
     { settings: { kind: "image" }, kind: "image", model: "gpt-image-1" },

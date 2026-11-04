@@ -1,6 +1,5 @@
 import {
   ApiError,
-  chainExists,
   dbError,
   json,
   parseId,
@@ -9,9 +8,19 @@ import {
   route,
   supabaseServer,
 } from "@/lib/server";
-import { runSchema, stepSchema } from "@/lib/validation";
+import { runSchema, generationStepSchema } from "@/lib/validation";
 import { GenerationError, generateStep, renderPrompt } from "@/lib/generation";
-import type { ChainRun, ChainStep, RunOutput } from "@/lib/types";
+import type { ChainRun, RunOutput } from "@/lib/types";
+import { randomUUID } from "node:crypto";
+import { getChain } from "@/lib/chain-store";
+import { getRegistryModels } from "@/lib/model-registry";
+import { listLegacyHistory } from "@/lib/legacy-history";
+import {
+  createRun,
+  updateRun,
+  listRuns,
+  GENERATED_MEDIA_BUCKET,
+} from "@/lib/run-store";
 export const runtime = "nodejs";
 export const maxDuration = 300;
 
@@ -22,34 +31,77 @@ async function withSignedImages(
   const outputs = await Promise.all(
     (run.outputs || []).map(async (output) => {
       if (!output.image_path) return output;
-      const { data, error } = await db.storage
-        .from("prompt-chain-media")
-        .createSignedUrl(output.image_path, 3600);
-      // Preserve history even if a stored image has been removed.
-      return { ...output, content: error ? "" : data.signedUrl };
+      try {
+        const { data, error } = await db.storage
+          .from(GENERATED_MEDIA_BUCKET)
+          .createSignedUrl(output.image_path, 3600);
+        // Preserve the other outputs when an image was removed or is unavailable.
+        return { ...output, content: error ? "" : data?.signedUrl || "" };
+      } catch {
+        return { ...output, content: "" };
+      }
     }),
   );
   return { ...run, outputs };
 }
+// Check the actual authenticated Storage permissions before paying for images.
+// The probe contains no user content and is always removed through the Storage API.
+async function checkImageStorage(
+  db: Awaited<ReturnType<typeof supabaseServer>>,
+  chainId: string,
+) {
+  const bucket = db.storage.from(GENERATED_MEDIA_BUCKET);
+  const path = `${chainId}/.checks/${randomUUID()}.png`;
+  const png = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAC0lEQVR4nGNgAAIAAAUAAXpeqz8AAAAASUVORK5CYII=",
+    "base64",
+  );
+  let uploaded = false;
+  let ready = false;
+  try {
+    const { error: uploadError } = await bucket.upload(path, png, {
+      contentType: "image/png",
+      upsert: false,
+    });
+    if (!uploadError) {
+      uploaded = true;
+      const { data, error } = await bucket.createSignedUrl(path, 60);
+      ready = !error && !!data?.signedUrl;
+    }
+  } catch {
+    ready = false;
+  } finally {
+    if (uploaded) {
+      try {
+        const { data, error } = await bucket.remove([path]);
+        if (error || !data?.some((object) => object.name === path))
+          ready = false;
+      } catch {
+        ready = false;
+      }
+    }
+  }
+  if (!ready)
+    throw new ApiError(
+      503,
+      "Private image storage is not available for this account yet. Ask your administrator to complete the Chainlab storage setup.",
+    );
+}
+
 export const GET = route(async (_request, { params }) => {
   const { db } = await requireAdmin();
   const id = parseId((await params).id);
-  await chainExists(db, id);
-  const { data, error } = await db
-    .from("prompt_chain_runs")
-    .select("*")
-    .eq("chain_id", id)
-    .order("created_at", { ascending: false })
-    .limit(50);
-  dbError(error, "Could not load generated media.");
+  const [runs, legacy] = await Promise.all([
+    listRuns(db, id),
+    listLegacyHistory(db, id),
+  ]);
   return json({
-    runs: await Promise.all(
-      (data || []).map((run) => withSignedImages(db, run)),
-    ),
+    runs: await Promise.all(runs.map((run) => withSignedImages(db, run))),
+    legacy,
   });
 });
 export const POST = route(async (request, { params }) => {
-  const { db, user } = await requireAdmin();
+  const { db } = await requireAdmin();
   const id = parseId((await params).id);
   const body = await readBody(request, runSchema, 7_100_000);
   const key = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
@@ -58,14 +110,8 @@ export const POST = route(async (request, { params }) => {
       503,
       "Media generation is not configured yet. Ask your administrator to connect an AI provider.",
     );
-  await chainExists(db, id);
-  const { data: rawSteps, error: stepsError } = await db
-    .from("prompt_chain_steps")
-    .select("*")
-    .eq("chain_id", id)
-    .order("position");
-  dbError(stepsError, "Could not load chain steps.");
-  const steps = (rawSteps || []) as ChainStep[];
+  const models = await getRegistryModels(db);
+  const { steps } = await getChain(db, id, { models });
   if (!steps.length)
     throw new ApiError(400, "Add a step before running this chain.");
   if (steps.length > 10)
@@ -75,11 +121,14 @@ export const POST = route(async (request, { params }) => {
     );
   for (const step of steps) {
     if (
-      !stepSchema.safeParse({
+      step.generation_ready === false ||
+      !generationStepSchema.safeParse({
         name: step.name,
         prompt: step.prompt,
         model: step.model,
         kind: step.kind,
+        role: step.role,
+        model_id: step.model_id,
       }).success
     )
       throw new ApiError(
@@ -87,18 +136,9 @@ export const POST = route(async (request, { params }) => {
         `Check the model and prompt for step “${step.name}” before running.`,
       );
   }
-  const { data: created, error: createError } = await db
-    .from("prompt_chain_runs")
-    .insert({
-      chain_id: id,
-      created_by: user.id,
-      input: body.input || "(Image input)",
-      status: "running",
-      outputs: [],
-    })
-    .select()
-    .single();
-  dbError(createError, "Could not start this run.");
+  if (steps.some((step) => step.kind === "image"))
+    await checkImageStorage(db, id);
+  const created = await createRun(db, id, body.input || "(Image input)");
   const outputs: RunOutput[] = [];
   const texts: string[] = [];
   let previous = body.input;
@@ -128,7 +168,7 @@ export const POST = route(async (request, { params }) => {
       } else {
         const imagePath = `${id}/${created.id}/${step.id}.png`;
         const { error: uploadError } = await db.storage
-          .from("prompt-chain-media")
+          .from(GENERATED_MEDIA_BUCKET)
           .upload(imagePath, generated.bytes, {
             contentType: generated.mime,
             upsert: false,
@@ -145,19 +185,9 @@ export const POST = route(async (request, { params }) => {
         previous = `[Image generated by ${step.name}]`;
         texts.push(previous);
       }
-      const { error: progressError } = await db
-        .from("prompt_chain_runs")
-        .update({ outputs })
-        .eq("id", created.id);
-      dbError(progressError, "Run progress could not be saved.");
+      await updateRun(db, created, "running", outputs);
     }
-    const { data: completed, error: completeError } = await db
-      .from("prompt_chain_runs")
-      .update({ status: "completed", outputs })
-      .eq("id", created.id)
-      .select()
-      .single();
-    dbError(completeError, "The completed run could not be saved.");
+    const completed = await updateRun(db, created, "completed", outputs);
     return json({ run: await withSignedImages(db, completed) }, 201);
   } catch (error) {
     const message = signal.aborted
@@ -167,16 +197,20 @@ export const POST = route(async (request, { params }) => {
         : error instanceof GenerationError
           ? error.message
           : "The AI provider could not be reached. Please try again.";
-    const { data: failed, error: saveError } = await db
-      .from("prompt_chain_runs")
-      .update({ status: "failed", outputs, error: message.slice(0, 1000) })
-      .eq("id", created.id)
-      .select()
-      .single();
-    if (saveError)
+    let failed: ChainRun | null = null;
+    try {
+      failed = await updateRun(
+        db,
+        created,
+        "failed",
+        outputs,
+        message.slice(0, 1000),
+      );
+    } catch (saveError) {
       console.error("Failed run status could not be saved", {
-        code: saveError.code,
+        type: saveError instanceof Error ? saveError.name : "UnknownError",
       });
+    }
     return json(
       {
         error: message,

@@ -46,10 +46,15 @@ export async function generateStep({
   if (step.kind === "text") {
     endpoint = "https://api.openai.com/v1/chat/completions";
     headers["Content-Type"] = "application/json";
+    const role = step.role ?? "user";
+    if (!["system", "user", "assistant"].includes(role))
+      throw new GenerationError("Choose a valid prompt role for this step.");
+    const previousContext = `Input from the previous step:\n${previous || "(No text input)"}`;
     const content: unknown[] = [
       {
         type: "text",
-        text: `${prompt}\n\nInput from the previous step:\n${previous || "(No text input)"}`,
+        text:
+          role === "user" ? `${prompt}\n\n${previousContext}` : previousContext,
       },
     ];
     if (image)
@@ -60,7 +65,15 @@ export async function generateStep({
     body = JSON.stringify({
       model: step.model,
       max_completion_tokens: 1200,
-      messages: [{ role: "user", content }],
+      // Vision content belongs to a user message. Keep an assigned system or
+      // assistant prompt in its own role while passing the same prior context.
+      messages:
+        role === "user"
+          ? [{ role, content }]
+          : [
+              { role, content: prompt },
+              { role: "user", content },
+            ],
     });
   } else if (image) {
     endpoint = "https://api.openai.com/v1/images/edits";

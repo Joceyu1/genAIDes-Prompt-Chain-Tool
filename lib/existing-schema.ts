@@ -38,6 +38,7 @@ export interface RegistryModelDescriptor {
   model: string;
   provider: string;
   kind?: StepKind;
+  active?: boolean;
 }
 
 export interface ExistingStepAdaptation {
@@ -92,6 +93,7 @@ export function adaptExistingStep(
     providerModel = model.model;
     modelLabel = model.label;
     generationReady =
+      model.active !== false &&
       model.provider.toLowerCase() === "openai" &&
       supportedModelKind(providerModel) === kind &&
       (model.kind === undefined || model.kind === kind);

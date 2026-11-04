@@ -56,6 +56,8 @@ import type {
   SessionUser,
   StepKind,
 } from "@/lib/types";
+import type { RegistryModelDescriptor } from "@/lib/existing-schema";
+import type { LegacyHistoryItem } from "@/lib/legacy-history";
 
 type Theme = "light" | "dark" | "system";
 type Section = "chains" | "media";
@@ -84,6 +86,14 @@ const models = {
   ],
   image: [{ value: "gpt-image-1", label: "GPT Image 1" }],
 };
+function chainRunIssue(chain: PromptChain): string {
+  if (!chain.steps.length) return "Add a step before running this chain.";
+  if (chain.steps.length > 10)
+    return "Generation supports up to 10 steps per run. Split this chain to run it.";
+  if (chain.steps.some((step) => step.generation_ready === false))
+    return "A step uses an unavailable, inactive, or unsupported model. Choose a supported model before running.";
+  return "";
+}
 const exampleSteps = [
   {
     name: "Describe the image",
@@ -226,10 +236,15 @@ export default function Studio() {
     setLoading(true);
     let chainId: string | undefined;
     try {
+      const baseName = "From image to punchline";
+      const usedNames = new Set(chains.map((chain) => chain.name));
+      let exampleName = baseName;
+      for (let suffix = 2; usedNames.has(exampleName); suffix += 1)
+        exampleName = `${baseName} (${suffix})`;
       const { chain } = await api<{ chain: PromptChain }>("/api/chains", {
         method: "POST",
         body: JSON.stringify({
-          name: "From image to punchline",
+          name: exampleName,
           description:
             "Turn a photo into five scroll-stopping, funny captions.",
           status: "draft",
@@ -710,7 +725,7 @@ export default function Studio() {
       {deleteTarget && (
         <ConfirmDelete
           title={`Delete “${deleteTarget.name}”?`}
-          description="This permanently deletes the chain, all of its steps, and its generation history. This cannot be undone."
+          description="This permanently removes the chain and its steps. Existing media or workflow references may prevent deletion; set the chain to Draft to deactivate it instead."
           onClose={() => setDeleteTarget(null)}
           onConfirm={deleteChain}
         />
@@ -980,7 +995,7 @@ function ChainDialog({
           Chain name
           <input
             required
-            maxLength={100}
+            maxLength={120}
             placeholder="e.g. From image to punchline"
             value={name}
             onChange={(e) => setName(e.target.value)}
@@ -990,7 +1005,7 @@ function ChainDialog({
           Description <span className="optional">Optional</span>
           <textarea
             rows={3}
-            maxLength={1000}
+            maxLength={2000}
             placeholder="What will this chain create?"
             value={description}
             onChange={(e) => setDescription(e.target.value)}
@@ -1116,8 +1131,17 @@ function ChainEditor({
   const [over, setOver] = useState<string | null>(null);
   const [runVersion, setRunVersion] = useState(0);
   const steps = [...chain.steps].sort((a, b) => a.position - b.position);
+  const runIssue = chainRunIssue(chain);
+  const canReorder = steps.length < 1000;
   async function reorder(from: number, to: number) {
-    if (from === to || from < 0 || to < 0 || to >= steps.length || reordering)
+    if (
+      from === to ||
+      from < 0 ||
+      to < 0 ||
+      to >= steps.length ||
+      reordering ||
+      !canReorder
+    )
       return;
     const next = [...steps];
     const [moved] = next.splice(from, 1);
@@ -1143,6 +1167,8 @@ function ChainEditor({
     prompt: string;
     kind: StepKind;
     model: string;
+    role: string;
+    model_id: string | null;
   }) {
     await api(
       editing !== "new" && editing
@@ -1183,7 +1209,8 @@ function ChainEditor({
           </button>
           <button
             className="button primary"
-            disabled={!steps.length}
+            disabled={!!runIssue}
+            title={runIssue || undefined}
             onClick={() => setRunDialog(true)}
           >
             <Play size={15} fill="currentColor" />
@@ -1191,6 +1218,12 @@ function ChainEditor({
           </button>
         </div>
       </div>
+      {runIssue && steps.length > 0 && (
+        <p className="chain-run-warning" role="status">
+          <CircleHelp size={15} />
+          {runIssue}
+        </p>
+      )}
       <div className="editor-tabs">
         <button
           className={tab === "steps" ? "selected" : ""}
@@ -1219,8 +1252,13 @@ function ChainEditor({
                 <h2>The creative process</h2>
                 <p>Each step picks up where the last one left off.</p>
               </div>
-              <span className="step-total">{steps.length} / 10 steps</span>
+              <span className="step-total">{steps.length} / 1000 steps</span>
             </div>
+            {!canReorder && (
+              <p className="field-note">
+                To reorder a full 1000-step chain, remove a step first.
+              </p>
+            )}
             <div className="input-node">
               <span className="node-icon">
                 <Upload size={17} />
@@ -1238,7 +1276,7 @@ function ChainEditor({
               <div key={step.id}>
                 <article
                   className={`step-card ${over === step.id && dragged !== step.id ? "drag-over" : ""} ${dragged === step.id ? "dragging" : ""}`}
-                  draggable={!reordering}
+                  draggable={!reordering && canReorder}
                   onDragStart={(e) => {
                     setDragged(step.id);
                     e.dataTransfer.effectAllowed = "move";
@@ -1282,7 +1320,7 @@ function ChainEditor({
                       <button
                         className="icon-button"
                         aria-label={`Move ${step.name} up`}
-                        disabled={index === 0 || reordering}
+                        disabled={index === 0 || reordering || !canReorder}
                         onClick={() => reorder(index, index - 1)}
                       >
                         <ArrowUp size={14} />
@@ -1290,7 +1328,11 @@ function ChainEditor({
                       <button
                         className="icon-button"
                         aria-label={`Move ${step.name} down`}
-                        disabled={index === steps.length - 1 || reordering}
+                        disabled={
+                          index === steps.length - 1 ||
+                          reordering ||
+                          !canReorder
+                        }
                         onClick={() => reorder(index, index + 1)}
                       >
                         <ArrowDown size={14} />
@@ -1316,9 +1358,18 @@ function ChainEditor({
                     <div className="step-bottom">
                       <span className="model-pill">
                         <Sparkles size={12} />
-                        {models[step.kind].find((m) => m.value === step.model)
-                          ?.label || step.model}
+                        {step.model_label ||
+                          models[step.kind].find((m) => m.value === step.model)
+                            ?.label ||
+                          step.model ||
+                          "Assigned model"}
                       </span>
+                      {step.generation_ready === false && (
+                        <span className="step-model-warning">
+                          <CircleHelp size={12} />
+                          Model unavailable for generation
+                        </span>
+                      )}
                       <span>
                         <Link2 size={12} />
                         {index ? "Previous step output" : "Original input"}
@@ -1336,14 +1387,14 @@ function ChainEditor({
             ))}
             <button
               className="add-step"
-              disabled={steps.length >= 10}
+              disabled={steps.length >= 1000}
               onClick={() => setEditing("new")}
             >
               <Plus size={18} />
               <span>Add a step</span>
               <span className="add-step-hint">
-                {steps.length >= 10
-                  ? "10-step limit reached"
+                {steps.length >= 1000
+                  ? "1000-step limit reached"
                   : "Keep the ideas flowing"}
               </span>
             </button>
@@ -1478,14 +1529,59 @@ function StepDialog({
     prompt: string;
     kind: StepKind;
     model: string;
+    role: string;
+    model_id: string | null;
   }) => Promise<void>;
 }) {
   const [name, setName] = useState(step?.name || "");
   const [prompt, setPrompt] = useState(step?.prompt || "");
   const [kind, setKind] = useState<StepKind>(step?.kind || "text");
-  const [model, setModel] = useState(step?.model || "gpt-4.1-mini");
+  const [role, setRole] = useState(step ? (step.role ?? "") : "user");
+  const [modelId, setModelId] = useState<string | null>(step?.model_id ?? null);
+  const [fallbackModel, setFallbackModel] = useState(() => {
+    const choices = models[step?.kind || "text"];
+    return (
+      choices.find((choice) => choice.value === step?.model)?.value ||
+      choices[0].value
+    );
+  });
+  const [registryModels, setRegistryModels] = useState<
+    RegistryModelDescriptor[]
+  >([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsNote, setModelsNote] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const selectedModel = registryModels.find((choice) => choice.id === modelId);
+  const assignedModelUnavailable =
+    modelId !== null &&
+    (selectedModel
+      ? selectedModel.active === false ||
+        selectedModel.provider.toLowerCase() !== "openai" ||
+        !models[kind].some((choice) => choice.value === selectedModel.model) ||
+        (selectedModel.kind !== undefined && selectedModel.kind !== kind)
+      : modelId !== step?.model_id || step?.generation_ready !== true);
+  useEffect(() => {
+    let mounted = true;
+    api<{ models: RegistryModelDescriptor[] }>("/api/models")
+      .then((data) => {
+        if (!Array.isArray(data.models))
+          throw new Error("Missing model choices");
+        if (mounted) setRegistryModels(data.models);
+      })
+      .catch(() => {
+        if (mounted)
+          setModelsNote(
+            "Model choices could not load. Your existing model assignment will be preserved.",
+          );
+      })
+      .finally(() => {
+        if (mounted) setModelsLoading(false);
+      });
+    return () => {
+      mounted = false;
+    };
+  }, []);
   return (
     <Modal
       wide
@@ -1499,9 +1595,14 @@ function StepDialog({
           try {
             await onSave({
               name: name.trim(),
-              prompt: prompt.trim(),
+              prompt,
               kind,
-              model,
+              model:
+                modelId === null
+                  ? fallbackModel
+                  : (selectedModel?.model ?? step?.model ?? ""),
+              role,
+              model_id: modelId,
             });
           } catch (e) {
             setError((e as Error).message);
@@ -1550,7 +1651,7 @@ function StepDialog({
               onChange={(e) => {
                 const k = e.target.value as StepKind;
                 setKind(k);
-                setModel(models[k][0].value);
+                if (modelId === null) setFallbackModel(models[k][0].value);
               }}
             >
               <option value="text">Text</option>
@@ -1558,23 +1659,96 @@ function StepDialog({
             </select>
           </label>
           <label className="form-field">
+            Prompt role
+            <select
+              required
+              value={role}
+              onChange={(e) => setRole(e.target.value)}
+            >
+              {!role && (
+                <option value="" disabled>
+                  Choose the existing prompt role
+                </option>
+              )}
+              {role && !["system", "user", "assistant"].includes(role) && (
+                <option value={role}>{role}</option>
+              )}
+              <option value="system">System</option>
+              <option value="user">User</option>
+              <option value="assistant">Assistant</option>
+            </select>
+          </label>
+        </div>
+        <label className="form-field">
+          Model assignment
+          <select
+            value={modelId ?? ""}
+            onChange={(e) => {
+              const nextId = e.target.value || null;
+              setModelId(nextId);
+              const choice = registryModels.find((item) => item.id === nextId);
+              if (choice?.kind) setKind(choice.kind);
+              if (
+                nextId === null &&
+                !models[kind].some((item) => item.value === fallbackModel)
+              )
+                setFallbackModel(models[kind][0].value);
+            }}
+          >
+            <option value="">Workspace default</option>
+            {modelId && !selectedModel && (
+              <option value={modelId}>
+                {step?.model_label || "Assigned model"}
+              </option>
+            )}
+            {registryModels.map((choice) => (
+              <option
+                key={choice.id}
+                value={choice.id}
+                disabled={
+                  choice.active === false && choice.id !== step?.model_id
+                }
+              >
+                {choice.label}
+                {choice.active === false ? " (inactive)" : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+        {modelsLoading && (
+          <p className="field-note" role="status">
+            Loading model choices…
+          </p>
+        )}
+        {modelsNote && <p className="field-note">{modelsNote}</p>}
+        {assignedModelUnavailable && !modelsLoading && (
+          <p className="field-note model-warning">
+            This assignment can be saved, but generation needs an active,
+            supported model.
+          </p>
+        )}
+        {modelId === null && (
+          <label className="form-field">
             Model
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {models[kind].map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
+            <select
+              value={fallbackModel}
+              onChange={(e) => setFallbackModel(e.target.value)}
+            >
+              {models[kind].map((choice) => (
+                <option key={choice.value} value={choice.value}>
+                  {choice.label}
                 </option>
               ))}
             </select>
           </label>
-        </div>
+        )}
         <label className="form-field">
           Prompt
           <textarea
             className="prompt-textarea"
             required
             rows={7}
-            maxLength={12000}
+            maxLength={2000}
             placeholder="Tell the model what to do. Use {{previous}} to include the last step’s output."
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
@@ -1606,7 +1780,7 @@ function StepDialog({
             Cancel
           </button>
           <button
-            disabled={busy || !name.trim() || !prompt.trim()}
+            disabled={busy || !name.trim() || !prompt.trim() || !role}
             className="button primary"
           >
             {busy ? (
@@ -1636,6 +1810,7 @@ function RunDialog({
   const [imageName, setImageName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const runIssue = chainRunIssue(chain);
   async function selectFile(file?: File) {
     if (!file) return;
     if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
@@ -1661,6 +1836,10 @@ function RunDialog({
       <form
         onSubmit={async (e) => {
           e.preventDefault();
+          if (runIssue) {
+            setError(runIssue);
+            return;
+          }
           setBusy(true);
           setError("");
           try {
@@ -1694,6 +1873,11 @@ function RunDialog({
         <p className="modal-subtitle">
           {chain.name} · {chain.steps.length} connected steps
         </p>
+        {runIssue && (
+          <p className="chain-run-warning" role="status">
+            {runIssue}
+          </p>
+        )}
         <label className="form-field">
           Your input
           <textarea
@@ -1776,7 +1960,7 @@ function RunDialog({
           </button>
           <button
             className="button primary"
-            disabled={busy || (!input.trim() && !image)}
+            disabled={busy || !!runIssue || (!input.trim() && !image)}
           >
             {busy ? (
               <LoaderCircle className="spin" size={16} />
@@ -1801,14 +1985,20 @@ function RunHistory({
   onRun: () => void;
 }) {
   const [runs, setRuns] = useState<ChainRun[]>([]);
+  const [legacy, setLegacy] = useState<LegacyHistoryItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [opened, setOpened] = useState<string | null>(null);
   const load = useCallback(() => {
     setLoading(true);
     setError("");
-    api<{ runs: ChainRun[] }>(`/api/chains/${chain.id}/runs`)
-      .then((d) => setRuns(d.runs))
+    api<{ runs: ChainRun[]; legacy?: LegacyHistoryItem[] }>(
+      `/api/chains/${chain.id}/runs`,
+    )
+      .then((d) => {
+        setRuns(d.runs);
+        setLegacy(d.legacy ?? []);
+      })
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
   }, [chain.id]);
@@ -1831,7 +2021,7 @@ function RunHistory({
         </button>
       </div>
     );
-  if (!runs.length)
+  if (!runs.length && !legacy.length)
     return (
       <div className="empty-library">
         <div className="empty-media-icon">
@@ -1841,7 +2031,8 @@ function RunHistory({
         <p>Run this chain to see all your generated text and images here.</p>
         <button
           className="button primary"
-          disabled={!chain.steps.length}
+          disabled={!!chainRunIssue(chain)}
+          title={chainRunIssue(chain) || undefined}
           onClick={onRun}
         >
           <Play size={15} />
@@ -1850,102 +2041,170 @@ function RunHistory({
       </div>
     );
   return (
-    <div className="run-list">
-      {runs.map((run) => (
-        <article className="run-card" key={run.id}>
-          <button
-            className="run-card-heading"
-            onClick={() => setOpened(opened === run.id ? null : run.id)}
-          >
-            <div className={`run-status-icon ${run.status}`}>
-              {run.status === "completed" ? (
-                <CheckCheck size={19} />
-              ) : run.status === "failed" ? (
-                <X size={19} />
-              ) : (
-                <LoaderCircle size={19} className="spin" />
-              )}
-            </div>
-            <div>
-              <h3>
-                {run.input ? run.input.slice(0, 90) : "Image generation run"}
-              </h3>
-              <span>
-                {new Date(run.created_at).toLocaleString()} ·{" "}
-                {run.outputs.length} outputs
-              </span>
-            </div>
-            <span className={`run-status ${run.status}`}>{run.status}</span>
-            <ChevronDown
-              size={17}
-              className={opened === run.id ? "rotate" : ""}
-            />
-          </button>
-          {opened === run.id && (
-            <div className="run-outputs">
-              {run.error && <div className="form-error">{run.error}</div>}
-              {run.outputs.map((output, i) => (
-                <div className="run-output" key={`${run.id}-${i}`}>
-                  <div className="output-header">
-                    <span className="step-number">
-                      {String(i + 1).padStart(2, "0")}
-                    </span>
-                    <strong>{output.step_name}</strong>
-                    {output.kind === "text" && (
-                      <button
-                        className="icon-button"
-                        title="Copy output"
-                        aria-label={`Copy ${output.step_name} output`}
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(output.content);
-                            notify("Output copied");
-                          } catch {
-                            notify(
-                              "Could not access the clipboard. Select the text to copy it.",
-                              true,
-                            );
-                          }
-                        }}
-                      >
-                        <Copy size={15} />
-                      </button>
-                    )}
-                  </div>
-                  {output.kind === "image" ? (
-                    <div className="output-image">
-                      <img
-                        src={output.content || undefined}
-                        alt={
-                          output.content
-                            ? `Generated by ${output.step_name}`
-                            : "This stored image is no longer available."
-                        }
-                      />
-                      {output.content && (
-                        <a
-                          href={output.content}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="button secondary"
+    <>
+      <div className="run-list">
+        {runs.map((run) => (
+          <article className="run-card" key={run.id}>
+            <button
+              className="run-card-heading"
+              onClick={() => setOpened(opened === run.id ? null : run.id)}
+            >
+              <div className={`run-status-icon ${run.status}`}>
+                {run.status === "completed" ? (
+                  <CheckCheck size={19} />
+                ) : run.status === "failed" ? (
+                  <X size={19} />
+                ) : (
+                  <LoaderCircle size={19} className="spin" />
+                )}
+              </div>
+              <div>
+                <h3>
+                  {run.input ? run.input.slice(0, 90) : "Image generation run"}
+                </h3>
+                <span>
+                  {new Date(run.created_at).toLocaleString()} ·{" "}
+                  {run.outputs.length} outputs
+                </span>
+              </div>
+              <span className={`run-status ${run.status}`}>{run.status}</span>
+              <ChevronDown
+                size={17}
+                className={opened === run.id ? "rotate" : ""}
+              />
+            </button>
+            {opened === run.id && (
+              <div className="run-outputs">
+                {run.error && <div className="form-error">{run.error}</div>}
+                {run.outputs.map((output, i) => (
+                  <div className="run-output" key={`${run.id}-${i}`}>
+                    <div className="output-header">
+                      <span className="step-number">
+                        {String(i + 1).padStart(2, "0")}
+                      </span>
+                      <strong>{output.step_name}</strong>
+                      {output.kind === "text" && (
+                        <button
+                          className="icon-button"
+                          title="Copy output"
+                          aria-label={`Copy ${output.step_name} output`}
+                          onClick={async () => {
+                            try {
+                              await navigator.clipboard.writeText(
+                                output.content,
+                              );
+                              notify("Output copied");
+                            } catch {
+                              notify(
+                                "Could not access the clipboard. Select the text to copy it.",
+                                true,
+                              );
+                            }
+                          }}
                         >
-                          <Download size={15} />
-                          Open image
-                        </a>
+                          <Copy size={15} />
+                        </button>
                       )}
                     </div>
-                  ) : (
-                    <pre>{output.content}</pre>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </article>
-      ))}
-    </div>
+                    {output.kind === "image" ? (
+                      <div className="output-image">
+                        <img
+                          src={output.content || undefined}
+                          alt={
+                            output.content
+                              ? `Generated by ${output.step_name}`
+                              : "This stored image is no longer available."
+                          }
+                        />
+                        {output.content && (
+                          <a
+                            href={output.content}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="button secondary"
+                          >
+                            <Download size={15} />
+                            Open image
+                          </a>
+                        )}
+                      </div>
+                    ) : (
+                      <pre>{output.content}</pre>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+      <SavedHistory items={legacy} />
+    </>
   );
 }
+
+function SavedHistory({ items }: { items: LegacyHistoryItem[] }) {
+  if (!items.length) return null;
+  return (
+    <section className="saved-history" aria-label="Saved history">
+      <div className="saved-history-heading">
+        <h2>Saved history</h2>
+        <span>Read-only</span>
+      </div>
+      <p>Saved examples and generation requests for this chain.</p>
+      <div className="saved-history-list">
+        {items.map((item) => (
+          <article
+            className="saved-history-card"
+            key={`${item.source}:${item.id}`}
+          >
+            <div className="saved-history-meta">
+              <span>
+                {item.source === "saved_example"
+                  ? "Saved example"
+                  : "Generation request"}
+              </span>
+              <time dateTime={item.created_at}>
+                {new Date(item.created_at).toLocaleString()}
+              </time>
+              {item.status && <span>{item.status}</span>}
+            </div>
+            <h3>{item.title || item.prompt.slice(0, 100) || "Saved result"}</h3>
+            {(item.model || item.origin) && (
+              <p className="saved-history-meta">
+                {[item.model, item.origin].filter(Boolean).join(" · ")}
+              </p>
+            )}
+            <dl>
+              {[
+                ["Prompt", item.prompt],
+                ["Saved output", item.output],
+                ["Caption", item.caption],
+                ["Generation prompt", item.generation_prompt],
+                ["Generation status", item.generation_status],
+              ]
+                .filter(([, text]) => text !== null && text !== "")
+                .map(([label, text]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>
+                      <pre className="saved-history-text">{text}</pre>
+                    </dd>
+                  </div>
+                ))}
+            </dl>
+            {item.truncated && (
+              <p className="saved-history-truncation">
+                Some saved text is shortened.
+              </p>
+            )}
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function MediaLibrary({
   chains,
   notify,

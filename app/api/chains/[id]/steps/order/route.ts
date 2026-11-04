@@ -1,20 +1,12 @@
-import {
-  dbError,
-  json,
-  parseId,
-  readBody,
-  requireAdmin,
-  route,
-} from "@/lib/server";
+import { json, parseId, readBody, requireAdmin, route } from "@/lib/server";
 import { orderSchema } from "@/lib/validation";
+import { reorderSteps } from "@/lib/chain-store";
+import { getRegistryModelsForEditing } from "@/lib/model-registry";
 export const PUT = route(async (request, { params }) => {
   const { db } = await requireAdmin();
   const id = parseId((await params).id);
   const body = await readBody(request, orderSchema);
-  const { data, error } = await db.rpc("reorder_chain_steps", {
-    p_chain_id: id,
-    p_step_ids: body.stepIds,
-  });
-  dbError(error, "Could not reorder steps.");
-  return json({ steps: data });
+  const models = await getRegistryModelsForEditing(db);
+  const chain = await reorderSteps(db, id, body.stepIds, { models });
+  return json({ steps: chain.steps });
 });

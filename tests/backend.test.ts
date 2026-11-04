@@ -3,6 +3,8 @@ import {
   chainSchema,
   chainPatchSchema,
   stepSchema,
+  stepUpdateSchema,
+  generationStepSchema,
   orderSchema,
   runSchema,
 } from "../lib/validation";
@@ -59,6 +61,36 @@ describe("chain and step validation", () => {
         prompt: "  ",
       }).success,
     ).toBe(false);
+  });
+  it("preserves registry assignments and separates editing from generation", () => {
+    const existing = {
+      name: "Existing",
+      prompt: "  keep this spacing\n",
+      kind: "text" as const,
+      model: "claude-provider-model",
+      role: "system" as const,
+      model_id: "11111111-1111-4111-8111-111111111111",
+    };
+    expect(stepSchema.parse(existing)).toEqual(existing);
+    expect(generationStepSchema.safeParse(existing).success).toBe(false);
+    const { model_id, ...omitted } = existing;
+    expect(stepUpdateSchema.parse(omitted)).not.toHaveProperty("model_id");
+    expect(
+      stepUpdateSchema.safeParse({ ...omitted, model_id: null }).success,
+    ).toBe(false);
+    expect(
+      stepUpdateSchema.parse({
+        ...omitted,
+        model: "gpt-4.1-mini",
+        model_id: null,
+      }).model_id,
+    ).toBeNull();
+    expect(
+      stepSchema.safeParse({ ...existing, prompt: "x".repeat(2001) }).success,
+    ).toBe(false);
+    expect(stepSchema.safeParse({ ...existing, role: "admin" }).success).toBe(
+      false,
+    );
   });
   it("rejects duplicate IDs in reorder requests", () => {
     const id = "c41e8d9a-6714-491a-a68f-a324a3d39ebd";

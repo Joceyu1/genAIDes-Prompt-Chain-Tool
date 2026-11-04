@@ -4,8 +4,8 @@ export const IMAGE_MODELS = ["gpt-image-1"] as const;
 export const uuid = z.string().uuid();
 const chainFields = z
   .object({
-    name: z.string().trim().min(1).max(100),
-    description: z.string().trim().max(1000),
+    name: z.string().trim().min(1).max(120),
+    description: z.string().max(2000),
     status: z.enum(["draft", "active"]),
   })
   .strict();
@@ -16,26 +16,43 @@ export const chainSchema = chainFields.extend({
 export const chainPatchSchema = chainFields
   .partial()
   .refine((v) => Object.keys(v).length > 0, "No changes supplied");
-export const stepSchema = z
+const stepFields = z
   .object({
     name: z.string().trim().min(1).max(100),
-    prompt: z.string().trim().min(1).max(12000),
+    prompt: z
+      .string()
+      .min(1)
+      .max(2000)
+      .refine((v) => v.trim().length > 0, "Add a prompt"),
     kind: z.enum(["text", "image"]),
-    model: z.string(),
+    model: z.string().max(200),
+    role: z.enum(["system", "user", "assistant"]).optional(),
+    model_id: uuid.nullable().optional(),
   })
-  .strict()
-  .superRefine((v, ctx) => {
-    const models: readonly string[] =
-      v.kind === "text" ? TEXT_MODELS : IMAGE_MODELS;
-    if (!models.includes(v.model))
-      ctx.addIssue({
-        code: "custom",
-        path: ["model"],
-        message: "Choose a supported model for this output type",
-      });
-  });
+  .strict();
+function validateFallback(v: z.infer<typeof stepFields>, ctx: z.RefinementCtx) {
+  const models: readonly string[] =
+    v.kind === "text" ? TEXT_MODELS : IMAGE_MODELS;
+  if (!models.includes(v.model))
+    ctx.addIssue({
+      code: "custom",
+      path: ["model"],
+      message: "Choose a supported workspace model for this output type",
+    });
+}
+export const stepSchema = stepFields.superRefine((v, ctx) => {
+  if (v.model_id == null) validateFallback(v, ctx);
+});
+// Omitted assignments on updates are resolved by the locked database function.
+// A registry model may use an unsupported provider while remaining editable.
+export const stepUpdateSchema = stepFields.superRefine((v, ctx) => {
+  if (v.model_id === null) validateFallback(v, ctx);
+});
+export const generationStepSchema = stepFields.superRefine((v, ctx) => {
+  validateFallback(v, ctx);
+});
 export const orderSchema = z
-  .object({ stepIds: z.array(uuid).max(30) })
+  .object({ stepIds: z.array(uuid).max(1000) })
   .strict()
   .refine(
     (v) => new Set(v.stepIds).size === v.stepIds.length,
