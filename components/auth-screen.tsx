@@ -42,7 +42,7 @@ export function AuthScreen({ onAuthenticated, initialError }: AuthScreenProps) {
       superadmin_required:
         "Your Google account signed in, but this workspace requires an existing superadmin profile.",
       profile_unavailable:
-        "Your Google account signed in, but the administrator profile could not be verified. The project administrator needs to check the profiles table and its access policies.",
+        "Your Google account signed in, but the administrator check could not run. The project administrator needs to check the Chainlab database setup.",
       oauth_unavailable:
         "The sign-in service is unavailable. Please try again shortly.",
     };

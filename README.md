@@ -27,7 +27,13 @@ The public Supabase project is `https://qrgjqpdvvbwmjpthpmlo.supabase.co`. Set t
 
 ## Database setup
 
-Apply [the migration](supabase/migrations/20261102000000_prompt_chains.sql) in the linked project's Supabase SQL editor or your established migration workflow. Review it before applying to an existing shared project: it preserves profile rows and existing role values, adds prompt chain tables/functions, and prevents untrusted changes to `is_superadmin`, including through older permissive profile policies. Existing `profiles.id` must match `auth.users.id`.
+The linked shared project already has assignment chain tables. For the sign-in repair, run only [supabase/repair-superadmin-access.sql](supabase/repair-superadmin-access.sql) once in that project's SQL editor. It installs the current-user role function without adopting or changing existing chain tables, profile policies, or user data. It stops if that function already exists. Existing-schema installations also need their table columns and access rules checked before chain operations can be validated.
+
+For a separate empty database, [supabase/setup.sql](supabase/setup.sql) combines the complete schema migrations into one guarded transaction and refuses to overwrite pre-existing app objects. It preserves profile rows, existing role values, and profile-read policies, adds the chain tables/functions, and prevents untrusted changes to `is_superadmin`. Existing `profiles.id` must match `auth.users.id`. An established migration workflow can instead apply the dated migrations in order. Do not use this fresh-schema script to replace the linked project's assignment tables.
+
+The API calls the no-argument `chainlab_is_superadmin()` function to check the authenticated user's own flag. This function returns only a boolean and is executable by authenticated users only. It uses a fixed search path and a trusted database owner so a separate application's restrictive domain policy cannot hide an already-approved superadmin flag. Existing policies such as `columbia_profiles_guard` continue to govern direct profile reads; the app does not remove or weaken them. No service-role credential is used by the application.
+
+Regenerate the combined SQL after editing its source migrations with `node scripts/build-supabase-setup.mjs`; add `--repair` to regenerate the authorization-only repair. Both modes support `--check` to detect a stale artifact.
 
 With `SUPABASE_ACCESS_TOKEN` supplied securely, the optional Management API helper inspects schema metadata without reading application rows:
 
@@ -37,9 +43,9 @@ node --use-env-proxy scripts/configure-supabase.mjs
 node --use-env-proxy scripts/configure-supabase.mjs --apply
 ```
 
-The helper targets this exact project and refuses incompatible profiles or pre-existing app objects. It does not automatically adopt or overwrite another application's tables, functions, policies, or storage bucket. After a successful initial migration, inspect rather than rerun `--apply`.
+The helper targets this exact project and refuses incompatible profiles or pre-existing app objects. Its `--apply` mode is for initial schema setup and intentionally stops against the existing assignment tables. It does not automatically adopt or overwrite another application's tables, functions, policies, or storage bucket. After a successful initial migration, inspect rather than rerun `--apply`.
 
-The migration creates a private `prompt-chain-media` storage bucket and a role check. It never grants a user superadmin access. Use a trusted SQL session to explicitly grant an intended existing account access:
+The setup creates a private `prompt-chain-media` storage bucket and role checks. It never grants a user superadmin access. Use a trusted SQL session to explicitly grant an intended existing account access:
 
 ```sql
 update public.profiles

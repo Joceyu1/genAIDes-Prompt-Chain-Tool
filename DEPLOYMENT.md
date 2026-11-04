@@ -13,7 +13,7 @@ Never commit credentials to Git or paste them into chat. Do not put the Vercel d
 
 ## Prepare production
 
-1. Apply `supabase/migrations/20261102000000_prompt_chains.sql` to the intended Supabase project. Review its compatibility with any existing `profiles` table. Users must not be able to grant themselves superadmin status. Existing accounts must have `profiles.id = auth.uid()` and `profiles.is_superadmin = true` to use the app.
+1. For the linked project with existing assignment tables, apply only `supabase/repair-superadmin-access.sql` for the sign-in repair, then verify the existing chain-table schema and access rules. For a separate empty database, use `supabase/setup.sql` or the dated migrations; the guarded fresh setup aborts on existing app objects. The `chainlab_is_superadmin()` function checks only the authenticated user's own flag, preserving restrictive profile policies used by other applications. Existing accounts must have `profiles.id = auth.uid()` and `profiles.is_superadmin = true`; users cannot grant themselves that role.
 2. Configure these application environment variables in Vercel for Production and Preview:
    - `NEXT_PUBLIC_SUPABASE_URL`
    - `NEXT_PUBLIC_SUPABASE_ANON_KEY` or `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`
@@ -48,7 +48,7 @@ Never commit credentials to Git or paste them into chat. Do not put the Vercel d
    SUPABASE_MIGRATION_APPLIED=1 node --use-env-proxy scripts/configure-vercel.mjs --apply --deploy
    ```
 
-   `SUPABASE_MIGRATION_APPLIED=1` is a non-secret deployment-tool confirmation that an operator applied the migration; it does not perform or verify the migration. The helper checks required Production variable names using encrypted metadata only. It never decrypts or logs their values. Presence of a variable name is not proof that its value works. It reads the GitHub repository ID from the project link, falling back to `gh api`, and deploys `main` (or `DEPLOY_REF` when explicitly set).
+   `SUPABASE_MIGRATION_APPLIED=1` is a non-secret deployment-tool confirmation that an operator applied the complete database setup, including the current-user role function; it does not perform or verify setup. The helper checks required Production variable names using encrypted metadata only. It never decrypts or logs their values. Presence of a variable name is not proof that its value works. It reads the GitHub repository ID from the project link, falling back to `gh api`, and deploys `main` (or `DEPLOY_REF` when explicitly set).
 
 The scope, project name, and repository can be overridden by explicit non-secret `VERCEL_SCOPE`, `VERCEL_PROJECT_NAME`, and `GITHUB_REPOSITORY` settings for future projects. The defaults match the supplied link exactly.
 

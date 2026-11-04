@@ -458,7 +458,7 @@ test("OAuth failures are actionable and never expose callback codes", async ({
   await mockApi(page, { authenticated: false });
   await page.goto("/?auth_error=profile_unavailable");
   await expect(page.locator(".auth-error")).toContainText(
-    "administrator profile could not be verified",
+    "administrator check could not run",
   );
   await expect(page).toHaveURL("http://localhost:3000/");
   await expect(

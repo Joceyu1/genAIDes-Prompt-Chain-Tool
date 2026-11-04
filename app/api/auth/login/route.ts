@@ -30,7 +30,7 @@ export const POST = route(async (request) => {
     );
   }
   try {
-    await verifySuperadmin(db, data.user.id);
+    await verifySuperadmin(db);
   } catch (error) {
     await db.auth.signOut();
     throw error;

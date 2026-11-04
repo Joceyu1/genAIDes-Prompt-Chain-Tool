@@ -27,16 +27,7 @@ function client(flag: boolean | null = true, profileError: unknown = null) {
         .mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
       signOut: vi.fn().mockResolvedValue({ error: null }),
     },
-    from: vi.fn(() => ({
-      select: () => ({
-        eq: () => ({
-          maybeSingle: async () => ({
-            data: flag === null ? null : { is_superadmin: flag },
-            error: profileError,
-          }),
-        }),
-      }),
-    })),
+    rpc: vi.fn().mockResolvedValue({ data: flag, error: profileError }),
   };
   mocks.server.mockResolvedValue(db);
   return db;

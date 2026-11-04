@@ -160,7 +160,7 @@ await run({
     { path: "/v9/projects/genaides-prompt-chain-tool", body: project },
     { path: "/v10/projects/prj_test/env", body: { envs } },
   ],
-  expectError: /Apply supabase\/migrations/,
+  expectError: /Complete the database setup/,
 });
 const deployCalls = await run({
   args: ["--deploy"],

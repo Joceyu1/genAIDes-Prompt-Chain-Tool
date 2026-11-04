@@ -28,7 +28,7 @@ export async function GET(request: Request) {
       return failure("oauth_session");
     }
     try {
-      await verifySuperadmin(db, data.user.id);
+      await verifySuperadmin(db);
     } catch (error) {
       await db.auth.signOut();
       return failure(

@@ -21,74 +21,65 @@ beforeEach(() => {
   mocks.create.mockReset();
 });
 describe("superadmin authorization", () => {
-  it("denies an anonymous session", async () => {
-    mocks.create.mockReturnValue({
+  it("denies an anonymous session before calling the role function", async () => {
+    const db = {
       auth: {
         getUser: vi
           .fn()
           .mockResolvedValue({ data: { user: null }, error: null }),
       },
-    });
+      rpc: vi.fn(),
+    };
+    mocks.create.mockReturnValue(db);
     await expect(requireAdmin()).rejects.toMatchObject({ status: 401 });
+    expect(db.rpc).not.toHaveBeenCalled();
   });
-  it.each([false, null, "true"])(
-    "denies a non-boolean or missing admin flag (%s)",
+  it.each([false, null, "true", [true], { is_superadmin: true }])(
+    "denies any role result other than boolean true (%j)",
     async (flag) => {
-      const maybeSingle = vi.fn().mockResolvedValue({
-        data: flag === null ? null : { is_superadmin: flag },
-        error: null,
-      });
-      mocks.create.mockReturnValue({
+      const db = {
         auth: {
           getUser: vi
             .fn()
             .mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
         },
-        from: vi.fn(() => ({
-          select: () => ({ eq: () => ({ maybeSingle }) }),
-        })),
-      });
+        rpc: vi.fn().mockResolvedValue({ data: flag, error: null }),
+      };
+      mocks.create.mockReturnValue(db);
       await expect(requireAdmin()).rejects.toMatchObject({ status: 403 });
+      expect(db.rpc).toHaveBeenCalledWith("chainlab_is_superadmin");
     },
   );
-  it("allows only a verified authenticated superadmin", async () => {
-    const maybeSingle = vi
-      .fn()
-      .mockResolvedValue({ data: { is_superadmin: true }, error: null });
+  it("allows only a verified user whose own role function returns true", async () => {
     const db = {
       auth: {
         getUser: vi
           .fn()
           .mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
       },
-      from: vi.fn(() => ({ select: () => ({ eq: () => ({ maybeSingle }) }) })),
+      rpc: vi.fn().mockResolvedValue({ data: true, error: null }),
     };
     mocks.create.mockReturnValue(db);
     await expect(requireAdmin()).resolves.toMatchObject({
       user: { id: "user" },
     });
     expect(db.auth.getUser).toHaveBeenCalledOnce();
+    expect(db.rpc).toHaveBeenCalledWith("chainlab_is_superadmin");
   });
-  it("fails closed if profile verification fails", async () => {
-    mocks.create.mockReturnValue({
-      auth: {
-        getUser: vi
-          .fn()
-          .mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
-      },
-      from: vi.fn(() => ({
-        select: () => ({
-          eq: () => ({
-            maybeSingle: async () => ({
-              data: null,
-              error: { code: "DB_DOWN" },
-            }),
-          }),
-        }),
-      })),
-    });
-    await expect(requireAdmin()).rejects.toMatchObject({ status: 503 });
-  });
+  it.each(["DB_DOWN", "PGRST202", "42501"])(
+    "fails closed when the role function fails (%s)",
+    async (code) => {
+      mocks.create.mockReturnValue({
+        auth: {
+          getUser: vi
+            .fn()
+            .mockResolvedValue({ data: { user: { id: "user" } }, error: null }),
+        },
+        rpc: vi.fn().mockResolvedValue({ data: null, error: { code } }),
+      });
+      await expect(requireAdmin()).rejects.toMatchObject({ status: 503 });
+    },
+  );
 });
 describe("request boundaries", () => {
   it("uses the actual request host when Next binds to 0.0.0.0", () => {

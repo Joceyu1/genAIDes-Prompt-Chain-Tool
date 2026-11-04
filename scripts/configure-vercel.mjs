@@ -285,7 +285,7 @@ if (deploy) {
     );
   if (process.env.SUPABASE_MIGRATION_APPLIED !== "1") {
     throw new Error(
-      "Apply supabase/migrations/20261102000000_prompt_chains.sql to the intended Supabase project first, then set the non-secret deployment-tool flag SUPABASE_MIGRATION_APPLIED=1. This flag records operator confirmation; it does not verify the database.",
+      "Complete the database setup described in README.md, including chainlab_is_superadmin(), then set the non-secret deployment-tool flag SUPABASE_MIGRATION_APPLIED=1. This flag records operator confirmation; it does not verify the database.",
     );
   }
   console.log(

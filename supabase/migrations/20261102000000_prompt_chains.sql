@@ -51,11 +51,8 @@ $$;
 revoke all on function public.is_prompt_chain_superadmin() from public;
 grant execute on function public.is_prompt_chain_superadmin() to authenticated, anon;
 
--- The API checks the authenticated user's own profile, without a service key.
-drop policy if exists prompt_chain_read_own_profile on public.profiles;
-create policy prompt_chain_read_own_profile on public.profiles
-  for select to authenticated using (id = (select auth.uid()));
-grant select (id, is_superadmin) on public.profiles to authenticated;
+-- Profile rows remain governed by the shared project's existing policies and
+-- grants. Chainlab authorizes through its no-argument boolean RPC instead.
 
 create table if not exists public.prompt_chains (
   id uuid primary key default gen_random_uuid(),

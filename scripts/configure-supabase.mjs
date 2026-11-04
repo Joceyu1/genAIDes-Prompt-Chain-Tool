@@ -16,6 +16,7 @@ export const RESERVED_TABLES = [
   "prompt_chain_runs",
 ];
 export const RESERVED_FUNCTIONS = [
+  "chainlab_is_superadmin",
   "guard_prompt_chain_superadmin_role",
   "is_prompt_chain_superadmin",
   "touch_prompt_chain_updated_at",
@@ -31,6 +32,21 @@ export const RESERVED_POLICIES = [
 const BUCKET = "prompt-chain-media";
 class ConfigurationError extends Error {}
 const quotedList = (values) => values.map((v) => `'${v}'`).join(",");
+export const MIGRATION_FILES = [
+  "20261102000000_prompt_chains.sql",
+  "20261104000000_chainlab_superadmin_check.sql",
+];
+
+export async function readMigrations() {
+  return Promise.all(
+    MIGRATION_FILES.map((name) =>
+      readFile(
+        new URL(`../supabase/migrations/${name}`, import.meta.url),
+        "utf8",
+      ),
+    ),
+  );
+}
 
 // Metadata only: no application rows, profile identities, credentials or emails.
 export const INSPECT_SQL = `
@@ -151,16 +167,24 @@ export async function managementQuery(query, readOnly, token) {
 }
 
 export function buildApplyQuery(migration) {
-  if (
-    (migration.match(/^begin;\s*$/gm) || []).length !== 1 ||
-    (migration.match(/^commit;\s*$/gm) || []).length !== 1
-  )
+  const migrations = Array.isArray(migration) ? migration : [migration];
+  if (!migrations.length)
     throw new ConfigurationError(
-      "The migration transaction format changed. Review the apply helper before proceeding.",
+      "At least one reviewed migration is required.",
     );
-  const content = migration
-    .replace(/^begin;\s*$/m, "")
-    .replace(/^commit;\s*$/m, "");
+  const content = migrations
+    .map((source) => {
+      if (
+        typeof source !== "string" ||
+        (source.match(/^begin;\s*$/gm) || []).length !== 1 ||
+        (source.match(/^commit;\s*$/gm) || []).length !== 1
+      )
+        throw new ConfigurationError(
+          "The migration transaction format changed. Review the apply helper before proceeding.",
+        );
+      return source.replace(/^begin;\s*$/m, "").replace(/^commit;\s*$/m, "");
+    })
+    .join("\n\n");
   // Recheck app object collisions inside the write transaction before any DDL.
   // There is intentionally no automatic replay or schema/table replacement.
   return `begin;
@@ -169,8 +193,23 @@ do $guard$ begin
  if exists(select 1 from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname in (${quotedList(RESERVED_TABLES)}))
  or exists(select 1 from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname='public' and p.proname in (${quotedList(RESERVED_FUNCTIONS)}))
  or exists(select 1 from pg_policies where policyname in (${quotedList(RESERVED_POLICIES)}))
+ or exists(select 1 from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname='public' and c.relname='profiles' and t.tgname='guard_prompt_chain_superadmin_role' and not t.tgisinternal)
  or exists(select 1 from storage.buckets where id='${BUCKET}') then
   raise exception 'App object collision detected; migration aborted without adopting existing objects';
+ end if;
+ if to_regclass('public.profiles') is not null then
+  if not exists (
+    select 1 from pg_attribute a
+    where a.attrelid='public.profiles'::regclass and a.attname='id'
+      and a.atttypid='uuid'::regtype and a.attnotnull and not a.attisdropped
+      and exists(select 1 from pg_index i where i.indrelid=a.attrelid and i.indisunique and i.indisvalid and i.indnkeyatts=1 and i.indkey[0]=a.attnum)
+  ) then
+   raise exception 'Existing profiles.id must be a non-null UUID with a single-column unique or primary key';
+  end if;
+  if exists(select 1 from pg_attribute a where a.attrelid='public.profiles'::regclass and a.attname='is_superadmin' and not a.attisdropped and a.atttypid<>'boolean'::regtype)
+  or exists(select 1 from pg_attribute a join pg_attrdef d on d.adrelid=a.attrelid and d.adnum=a.attnum where a.attrelid='public.profiles'::regclass and a.attname='is_superadmin' and not a.attisdropped and lower(pg_get_expr(d.adbin,d.adrelid)) not in ('false','false::boolean','null::boolean')) then
+   raise exception 'Existing profiles.is_superadmin must be boolean with a safe default';
+  end if;
  end if;
 end $guard$;
 ${content}
@@ -227,14 +266,8 @@ export async function main(args = process.argv.slice(2)) {
     console.log("Read-only mode; no changes made.");
     return;
   }
-  const migration = await readFile(
-    new URL(
-      "../supabase/migrations/20261102000000_prompt_chains.sql",
-      import.meta.url,
-    ),
-    "utf8",
-  );
-  await managementQuery(buildApplyQuery(migration), false, token);
+  const migrations = await readMigrations();
+  await managementQuery(buildApplyQuery(migrations), false, token);
   console.log(
     "Migration API request completed. No superadmin grants were made. Inspect the schema and validate an authorized app session separately.",
   );

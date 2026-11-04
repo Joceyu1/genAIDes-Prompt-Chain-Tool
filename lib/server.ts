@@ -43,28 +43,25 @@ export async function requireAdmin() {
     error,
   } = await db.auth.getUser();
   if (error || !user) throw new ApiError(401, "Sign in to continue.");
-  await verifySuperadmin(db, user.id);
+  await verifySuperadmin(db);
   return { db, user };
 }
 export async function verifySuperadmin(
   db: Awaited<ReturnType<typeof supabaseServer>>,
-  userId: string,
 ) {
-  const { data: profile, error: profileError } = await db
-    .from("profiles")
-    .select("is_superadmin")
-    .eq("id", userId)
-    .maybeSingle();
-  if (profileError) {
-    console.error("Administrator profile verification failed", {
-      code: profileError.code,
+  // The function checks only auth.uid(). Direct profile reads can be hidden by
+  // an unrelated application's restrictive domain policy in the shared project.
+  const { data: isSuperadmin, error } = await db.rpc("chainlab_is_superadmin");
+  if (error) {
+    console.error("Administrator check failed", {
+      code: error.code,
     });
     throw new ApiError(
       503,
-      "Your login succeeded, but your administrator profile could not be verified. The project administrator needs to check the profiles table and its access policies.",
+      "Your login succeeded, but the administrator check could not run. The project administrator needs to check the Chainlab database setup.",
     );
   }
-  if (profile?.is_superadmin !== true)
+  if (isSuperadmin !== true)
     throw new ApiError(403, "This workspace is available to superadmins only.");
 }
 export const json = (value: unknown, status = 200) =>
