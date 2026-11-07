@@ -92,6 +92,65 @@ async function geminiLimitMessage(
   return "The Gemini API is busy or its quota was reached. Try again later.";
 }
 
+const GEMINI_INVALID_REQUEST_MESSAGE =
+  "Gemini could not process this prompt or image. Check the selected model, prompt, image, and Gemini API key.";
+const GEMINI_PERMISSION_MESSAGE =
+  "The Gemini API key was rejected or lacks permission for this model. Ask your administrator to check the Gemini key and project access.";
+const GEMINI_RESTRICTED_KEY_REASONS = new Set([
+  "API_KEY_SERVICE_BLOCKED",
+  "API_KEY_HTTP_REFERRER_BLOCKED",
+  "API_KEY_IP_ADDRESS_BLOCKED",
+  "API_KEY_ANDROID_APP_BLOCKED",
+  "API_KEY_IOS_APP_BLOCKED",
+]);
+
+async function geminiConfigurationMessage(
+  response: Response,
+  signal: AbortSignal,
+): Promise<string> {
+  const fallback =
+    response.status === 400
+      ? GEMINI_INVALID_REQUEST_MESSAGE
+      : GEMINI_PERMISSION_MESSAGE;
+  const error = await readBoundedProviderError(response, signal);
+  const reasons: string[] = [];
+  if (Array.isArray(error?.details)) {
+    for (const detail of error.details) {
+      if (
+        detail &&
+        typeof detail === "object" &&
+        detail["@type"] === "type.googleapis.com/google.rpc.ErrorInfo" &&
+        typeof detail.reason === "string"
+      )
+        reasons.push(detail.reason);
+    }
+  }
+  // Google API_KEY_INVALID also covers keys that expired or cannot be found.
+  // Only canonical ErrorInfo reasons select our static configuration guidance.
+  if (reasons.includes("API_KEY_INVALID"))
+    return "Google rejected the Gemini API key as invalid, expired, or unavailable. Ask your administrator to check the configured Google AI Studio key.";
+  if (reasons.some((reason) => GEMINI_RESTRICTED_KEY_REASONS.has(reason)))
+    return "The Gemini API key's application or API restrictions block this server request. Ask your administrator to check its restrictions and access to the Generative Language API.";
+  if (reasons.includes("SERVICE_DISABLED"))
+    return "The Generative Language API is disabled for this Google project. Ask your administrator to enable it for the Gemini API key's project.";
+  if (error?.status === "FAILED_PRECONDITION")
+    return "A Gemini API prerequisite is not satisfied. Check the Google AI Studio project, supported region, and free-tier eligibility before retrying.";
+  return fallback;
+}
+
+function geminiFailureMessage(status: number): string {
+  // HTTP status is safe diagnostic data; never copy an upstream error body.
+  if (status === 500)
+    return "The Gemini API encountered a temporary server error (HTTP 500). Try again later.";
+  if (status === 502 || status === 503)
+    return `The Gemini API is temporarily unavailable (HTTP ${status}). Try again later.`;
+  if (status === 504)
+    return "The Gemini API timed out (HTTP 504). Try again later.";
+  if (Number.isInteger(status) && status >= 100 && status <= 599)
+    return `The Gemini API could not complete this step (HTTP ${status}). Try again later.`;
+  return "The Gemini API could not complete this step. Try again later.";
+}
+
 export function getGenerationProvider(step: ChainStep): GenerationProvider {
   const provider = getModelProvider(step.model);
   if (!provider)
@@ -205,15 +264,15 @@ async function generateGemini({
   );
   if (!response.ok) {
     const message =
-      response.status === 401 || response.status === 403
-        ? "The Gemini API key was rejected or lacks permission for this model. Ask your administrator to check the Gemini key and project access."
+      response.status === 400 ||
+      response.status === 401 ||
+      response.status === 403
+        ? await geminiConfigurationMessage(response, signal)
         : response.status === 429
           ? await geminiLimitMessage(response, signal)
           : response.status === 404
             ? "The selected Gemini model is unavailable. Choose another supported Gemini model or check this project's model access."
-            : response.status === 400
-              ? "Gemini could not process this prompt or image. Check the selected model, prompt, image, and Gemini API key."
-              : "The Gemini API could not complete this step. Try again later.";
+            : geminiFailureMessage(response.status);
     throw new GenerationError(message);
   }
   if (Number(response.headers.get("content-length") || 0) > 30_000_000)

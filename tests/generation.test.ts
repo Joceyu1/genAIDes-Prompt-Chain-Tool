@@ -717,3 +717,285 @@ describe("private Gemini provider errors without paid fallback", () => {
     await expect(geminiGenerate({}, false, abort.signal)).rejects.toBe(failure);
   });
 });
+
+const geminiInvalidRequestMessage =
+  "Gemini could not process this prompt or image. Check the selected model, prompt, image, and Gemini API key.";
+const geminiPermissionMessage =
+  "The Gemini API key was rejected or lacks permission for this model. Ask your administrator to check the Gemini key and project access.";
+const geminiInvalidKeyMessage =
+  "Google rejected the Gemini API key as invalid, expired, or unavailable. Ask your administrator to check the configured Google AI Studio key.";
+const geminiRestrictedKeyMessage =
+  "The Gemini API key's application or API restrictions block this server request. Ask your administrator to check its restrictions and access to the Generative Language API.";
+const geminiDisabledServiceMessage =
+  "The Generative Language API is disabled for this Google project. Ask your administrator to enable it for the Gemini API key's project.";
+const geminiPreconditionMessage =
+  "A Gemini API prerequisite is not satisfied. Check the Google AI Studio project, supported region, and free-tier eligibility before retrying.";
+
+describe("private Google configuration diagnostics", () => {
+  const sensitive = "private-provider-key-user-prompt-and-image-details";
+  const errorInfo = (reason: string) => ({
+    "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+    reason,
+    domain: "googleapis.com",
+    metadata: {
+      service: "generativelanguage.googleapis.com",
+      consumer: sensitive,
+      apiKey: sensitive,
+    },
+  });
+  function configurationResponse(
+    status: number,
+    error: Record<string, unknown>,
+  ) {
+    return Response.json(
+      {
+        error: {
+          code: status,
+          status: "INVALID_ARGUMENT",
+          message: sensitive,
+          ...error,
+        },
+      },
+      { status },
+    );
+  }
+  it.each([400, 401, 403])(
+    "recognizes canonical API_KEY_INVALID on HTTP%s without exposing provider text",
+    async (status) => {
+      fetchMock.mockResolvedValue(
+        configurationResponse(status, {
+          details: [errorInfo("API_KEY_INVALID")],
+        }),
+      );
+      const failure = await geminiGenerate().catch((error) => error);
+      expect(failure).toBeInstanceOf(GenerationError);
+      expect(failure.message).toBe(geminiInvalidKeyMessage);
+      expect(String(failure)).not.toContain(sensitive);
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+  it.each([
+    "API_KEY_SERVICE_BLOCKED",
+    "API_KEY_HTTP_REFERRER_BLOCKED",
+    "API_KEY_IP_ADDRESS_BLOCKED",
+    "API_KEY_ANDROID_APP_BLOCKED",
+    "API_KEY_IOS_APP_BLOCKED",
+  ])(
+    "distinguishes canonical %s restrictions from a bad prompt",
+    async (reason) => {
+      fetchMock.mockResolvedValue(
+        configurationResponse(403, {
+          status: "PERMISSION_DENIED",
+          details: [errorInfo(reason)],
+        }),
+      );
+      await expect(geminiGenerate()).rejects.toThrow(
+        new GenerationError(geminiRestrictedKeyMessage),
+      );
+    },
+  );
+  it("distinguishes a disabled service using typed ErrorInfo", async () => {
+    fetchMock.mockResolvedValue(
+      configurationResponse(403, {
+        status: "PERMISSION_DENIED",
+        details: [errorInfo("SERVICE_DISABLED")],
+      }),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(geminiDisabledServiceMessage),
+    );
+  });
+  it("reports a project precondition without claiming payment is required", async () => {
+    fetchMock.mockResolvedValue(
+      configurationResponse(400, {
+        status: "FAILED_PRECONDITION",
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.PreconditionFailure",
+            violations: [{ description: sensitive, subject: sensitive }],
+          },
+        ],
+      }),
+    );
+    const failure = await geminiGenerate().catch((error) => error);
+    expect(failure.message).toBe(geminiPreconditionMessage);
+    expect(failure.message).not.toMatch(/billing|payment|credit/);
+    expect(failure.message).not.toContain(sensitive);
+  });
+  it("keeps ordinary invalid request arguments generic without interpreting violation descriptions", async () => {
+    fetchMock.mockResolvedValue(
+      configurationResponse(400, {
+        details: [
+          {
+            "@type": "type.googleapis.com/google.rpc.BadRequest",
+            fieldViolations: [
+              {
+                field: "contents",
+                description: "API_KEY_INVALID " + sensitive,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(geminiInvalidRequestMessage),
+    );
+  });
+  it.each([
+    { reason: "API_KEY_INVALID" },
+    {
+      "@type": "type.googleapis.com/unrelated.ErrorInfo",
+      reason: "API_KEY_INVALID",
+    },
+    { "@type": "google.rpc.ErrorInfo", reason: "API_KEY_INVALID" },
+    {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "api_key_invalid",
+    },
+    {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "API_KEY_INVALID_EXTRA",
+    },
+    {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "API_KEY_EXPIRED",
+    },
+    {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "API_KEY_NOT_FOUND",
+    },
+    {
+      "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+      reason: "HTTP_REFERRER_BLOCKED",
+    },
+  ])(
+    "does not infer key failure from an untyped or unknown reason (%j)",
+    async (detail) => {
+      fetchMock.mockResolvedValue(
+        configurationResponse(400, {
+          details: [detail],
+          message: "API_KEY_INVALID " + sensitive,
+        }),
+      );
+      await expect(geminiGenerate()).rejects.toThrow(
+        new GenerationError(geminiInvalidRequestMessage),
+      );
+    },
+  );
+  it.each([400, 401, 403])(
+    "preserves HTTP%s fallback guidance for malformed error JSON",
+    async (status) => {
+      fetchMock.mockResolvedValue(
+        new Response(`{"error":{"details":[${sensitive}`, { status }),
+      );
+      await expect(geminiGenerate()).rejects.toThrow(
+        new GenerationError(
+          status === 400
+            ? geminiInvalidRequestMessage
+            : geminiPermissionMessage,
+        ),
+      );
+    },
+  );
+  it("ignores oversized configuration JSON despite an understated Content-Length", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            status: "INVALID_ARGUMENT",
+            details: [errorInfo("API_KEY_INVALID")],
+            message: sensitive.repeat(500),
+          },
+        }),
+        { status: 400, headers: { "content-length": "1" } },
+      ),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(geminiInvalidRequestMessage),
+    );
+  });
+  it("keeps configuration diagnostics bounded when upstream cancellation stalls", async () => {
+    const cancel = vi.fn(() => new Promise<void>(() => {}));
+    const pull = vi.fn(
+      (controller: ReadableStreamDefaultController<Uint8Array>) =>
+        controller.enqueue(new Uint8Array(9000)),
+    );
+    fetchMock.mockResolvedValue(
+      new Response(
+        new ReadableStream<Uint8Array>({ pull, cancel }, { highWaterMark: 0 }),
+        { status: 403 },
+      ),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(geminiPermissionMessage),
+    );
+    expect(pull).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+  it("preserves cancellation while reading a configuration error", async () => {
+    const abort = new AbortController();
+    const failure = new DOMException("Generation timed out", "TimeoutError");
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          abort.abort(failure);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    fetchMock.mockResolvedValue(new Response(body, { status: 400 }));
+    await expect(geminiGenerate({}, false, abort.signal)).rejects.toBe(failure);
+  });
+});
+
+describe("safe Gemini HTTP service diagnostics", () => {
+  it.each([
+    [
+      500,
+      "The Gemini API encountered a temporary server error (HTTP 500). Try again later.",
+    ],
+    [
+      502,
+      "The Gemini API is temporarily unavailable (HTTP 502). Try again later.",
+    ],
+    [
+      503,
+      "The Gemini API is temporarily unavailable (HTTP 503). Try again later.",
+    ],
+    [504, "The Gemini API timed out (HTTP 504). Try again later."],
+    [
+      402,
+      "The Gemini API could not complete this step (HTTP 402). Try again later.",
+    ],
+    [
+      422,
+      "The Gemini API could not complete this step (HTTP 422). Try again later.",
+    ],
+  ] as const)(
+    "reports HTTP%s without exposing provider text or automatically retrying",
+    async (status, expected) => {
+      const response = Response.json(
+        {
+          error: {
+            code: status,
+            message: "private-provider-key-and-user-prompt",
+            details: [{ description: "private image details" }],
+          },
+        },
+        { status },
+      );
+      const getReader = vi.spyOn(response.body!, "getReader");
+      fetchMock.mockResolvedValue(response);
+      const failure = await geminiGenerate().catch((error) => error);
+      expect(failure).toBeInstanceOf(GenerationError);
+      expect(failure.message).toBe(expected);
+      expect(failure.message).not.toContain("private");
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock.mock.calls[0][0]).toContain(
+        "generativelanguage.googleapis.com",
+      );
+      expect(getReader).not.toHaveBeenCalled();
+    },
+  );
+});
