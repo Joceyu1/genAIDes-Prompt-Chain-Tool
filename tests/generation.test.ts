@@ -392,7 +392,7 @@ describe("explicit Gemini text generation", () => {
     ).resolves.toEqual({ kind: "text", text: "A stylish cat" });
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "https://generativelanguage.googleapis.com/v1/models/gemini-flash-lite-latest:generateContent",
+      "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent",
     );
     const options = fetchMock.mock.calls[0][1];
     expect(options.headers).toEqual({

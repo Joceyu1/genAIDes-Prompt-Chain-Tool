@@ -248,7 +248,7 @@ async function generateGemini({
         ]
       : [{ role: "user", parts }];
   const response = await fetch(
-    `https://generativelanguage.googleapis.com/v1/models/${encodeURIComponent(normalizeModelKey(step.model))}:generateContent`,
+    `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(normalizeModelKey(step.model))}:generateContent`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json", "x-goog-api-key": apiKey },
