@@ -183,6 +183,44 @@ assert.deepEqual(deployCalls.at(-1).body.gitSource, {
   repoId: "12345",
   ref: "main",
 });
+for (const providerKey of ["GEMINI_API_KEY", "GOOGLE_API_KEY"]) {
+  const geminiEnvs = [
+    "NEXT_PUBLIC_SUPABASE_URL",
+    "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY",
+    providerKey,
+  ].map((key) => ({ key, target: ["production"] }));
+  const calls = await run({
+    args: ["--deploy"],
+    overrides: { SUPABASE_MIGRATION_APPLIED: "1" },
+    responses: [
+      ...teamResponses(),
+      { path: "/v9/projects/genaides-prompt-chain-tool", body: project },
+      { path: "/v10/projects/prj_test/env", body: { envs: geminiEnvs } },
+      { path: "/v9/projects/prj_test", body: project },
+      { path: "/v9/projects/prj_test", body: project },
+      { path: "/v13/deployments", body: { url: "example.vercel.app" } },
+    ],
+  });
+  assert.equal(calls.at(-1).body.target, "production");
+  assert.equal(
+    calls.find((call) => call.path.endsWith("/env")).query.get("decrypt"),
+    "false",
+  );
+}
+await run({
+  args: ["--deploy"],
+  overrides: { SUPABASE_MIGRATION_APPLIED: "1" },
+  responses: [
+    ...teamResponses(),
+    { path: "/v9/projects/genaides-prompt-chain-tool", body: project },
+    {
+      path: "/v10/projects/prj_test/env",
+      body: { envs: envs.filter((entry) => entry.key !== "AI_API_KEY") },
+    },
+  ],
+  expectError:
+    /GEMINI_API_KEY or GOOGLE_API_KEY or AI_API_KEY or OPENAI_API_KEY/,
+});
 const personalCalls = await run({
   responses: [
     { path: "/v2/teams", body: { teams: [], pagination: {} } },
@@ -200,6 +238,7 @@ const publicOverrides = {
   NEXT_PUBLIC_SUPABASE_URL: "https://example.supabase.co",
   NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: "sb_publishable_test_fixture",
   AI_API_KEY: "proxy-placeholder-test-fixture",
+  GEMINI_API_KEY: "proxy-placeholder-gemini-test-fixture",
 };
 const syncCalls = await run({
   args: ["--sync-public-env"],
@@ -285,5 +324,5 @@ await run({
   expectError: /does not match the exact-scope/,
 });
 console.log(
-  "17 offline deployment checks passed: exact scope, scoped tokens, Node.js version, missing project, mismatched scope/repository, protection removal, production variable names, migration prerequisite, deployment payload, and public-only Supabase sync.",
+  "20 offline deployment checks passed: exact scope, scoped tokens, Node.js version, missing project, mismatched scope/repository, protection removal, OpenAI/Gemini production variable names, migration prerequisite, deployment payload, and public-only Supabase sync.",
 );

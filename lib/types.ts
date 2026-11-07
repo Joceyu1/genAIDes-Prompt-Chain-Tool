@@ -1,3 +1,5 @@
+import type { GenerationProvider } from "./model-catalog";
+
 export type StepKind = "text" | "image";
 export type ChainStep = {
   id: string;
@@ -12,6 +14,7 @@ export type ChainStep = {
   role?: string;
   model_id?: string | null;
   model_label?: string;
+  model_provider?: GenerationProvider;
   generation_ready?: boolean;
 };
 export type PromptChain = {

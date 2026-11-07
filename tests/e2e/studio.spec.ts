@@ -2,6 +2,13 @@ import { test, expect, type Page } from "@playwright/test";
 import type { PromptChain, ChainRun, ChainStep } from "../../lib/types";
 import type { RegistryModelDescriptor } from "../../lib/existing-schema";
 import type { LegacyHistoryItem } from "../../lib/legacy-history";
+import {
+  DEFAULT_TEXT_MODEL,
+  getModelProvider,
+  getSupportedModelKind,
+  normalizeModelKey,
+  normalizeRegistryProvider,
+} from "../../lib/model-catalog";
 
 const stamp = "2026-11-02T15:00:00.000Z";
 const ids = {
@@ -13,6 +20,7 @@ const ids = {
   imageModel: "66666666-6666-4666-8666-666666666666",
   inactiveModel: "77777777-7777-4777-8777-777777777777",
   unknownModel: "88888888-8888-4888-8888-888888888888",
+  geminiModel: "99999999-9999-4999-8999-999999999999",
 };
 type RegistryFixture = RegistryModelDescriptor & { active?: boolean };
 const registryFixtures = (): RegistryFixture[] => [
@@ -39,6 +47,13 @@ const registryFixtures = (): RegistryFixture[] => [
     provider: "openai",
     kind: "text",
     active: false,
+  },
+  {
+    id: ids.geminiModel,
+    label: "Gemini 3.5 Flash Lite",
+    model: "models/gemini-3.5-flash-lite",
+    provider: "google-ai-studio",
+    active: true,
   },
 ];
 const step = (id: string, name: string, position: number): ChainStep => ({
@@ -104,10 +119,6 @@ async function mockApi(page: Page, overrides: Partial<State> = {}) {
     ...overrides,
   };
   const resolveStep = (value: ChainStep): ChainStep => {
-    const supported =
-      value.kind === "image"
-        ? ["gpt-image-1"]
-        : ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"];
     if (value.model_id) {
       const assigned = state.models.find(
         (model) => model.id === value.model_id,
@@ -116,11 +127,16 @@ async function mockApi(page: Page, overrides: Partial<State> = {}) {
         ...value,
         model: assigned?.model || "",
         model_label: assigned?.label || "Assigned model",
+        model_provider: assigned
+          ? normalizeRegistryProvider(assigned.provider)
+          : undefined,
         generation_ready: Boolean(
           assigned &&
           assigned.active !== false &&
-          assigned.provider.toLowerCase() === "openai" &&
-          supported.includes(assigned.model) &&
+          normalizeRegistryProvider(assigned.provider) !== undefined &&
+          normalizeRegistryProvider(assigned.provider) ===
+            getModelProvider(assigned.model) &&
+          getSupportedModelKind(assigned.model) === value.kind &&
           (!assigned.kind || assigned.kind === value.kind),
         ),
       };
@@ -128,7 +144,10 @@ async function mockApi(page: Page, overrides: Partial<State> = {}) {
     return {
       ...value,
       model_id: null,
-      generation_ready: supported.includes(value.model),
+      model: normalizeModelKey(value.model),
+      model_label: normalizeModelKey(value.model),
+      model_provider: getModelProvider(value.model),
+      generation_ready: getSupportedModelKind(value.model) === value.kind,
     };
   };
   await page.route("**/api/**", async (route) => {
@@ -379,6 +398,9 @@ test("prompt steps support editing, keyboard reordering, image models, and delet
   await expect(
     dialog.getByRole("combobox", { name: "Model", exact: true }),
   ).toHaveValue("gpt-image-1");
+  await expect(dialog.getByRole("note")).toContainText(
+    "OpenAI image generation uses paid API credits",
+  );
   await dialog
     .getByRole("textbox", { name: "Prompt", exact: true })
     .fill("Create an editorial poster using {{previous}}");
@@ -399,6 +421,156 @@ test("prompt steps support editing, keyboard reordering, image models, and delet
     .click();
   await expect(page.locator(".step-card")).toHaveCount(2);
   expect(state.chains[0].steps.map((s) => s.position)).toEqual([1, 2]);
+});
+
+test("new text steps default to Gemini with qualified free-tier guidance", async ({
+  page,
+}) => {
+  const state = await mockApi(page);
+  await page.goto("/");
+  await openFirst(page);
+  await page.getByRole("button", { name: "Add a step" }).click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Model assignment")).toHaveValue("");
+  const model = dialog.getByRole("combobox", { name: "Model", exact: true });
+  await expect(model).toHaveValue(DEFAULT_TEXT_MODEL);
+  await expect(
+    model.locator(`option[value="${DEFAULT_TEXT_MODEL}"]`),
+  ).toHaveText("Gemini Flash Lite (latest)");
+  await expect(dialog.getByRole("note")).toContainText("Free tier project");
+  await expect(dialog.getByRole("note")).toContainText(
+    "availability and usage limits vary",
+  );
+  await dialog.getByLabel("Step name").fill("Gemini captions");
+  await dialog
+    .getByRole("textbox", { name: "Prompt", exact: true })
+    .fill("Write five funny captions about {{previous}}.");
+  await dialog.getByRole("button", { name: "Add step", exact: true }).click();
+  await expect(page.locator(".step-card")).toHaveCount(3);
+  expect(state.chains[0].steps.at(-1)).toMatchObject({
+    model_id: null,
+    model: DEFAULT_TEXT_MODEL,
+    model_provider: "gemini",
+    role: "user",
+    generation_ready: true,
+  });
+  expect(
+    state.requests.find(
+      (request) => request.method === "POST" && request.path.endsWith("/steps"),
+    )?.body,
+  ).toMatchObject({ model_id: null, model: DEFAULT_TEXT_MODEL });
+});
+
+test("an existing OpenAI fallback changes provider only after explicit Gemini selection", async ({
+  page,
+}) => {
+  const state = await mockApi(page);
+  await page.goto("/");
+  await openFirst(page);
+  await page.locator(".step-card-body").first().click();
+  let dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("combobox", { name: "Model", exact: true }),
+  ).toHaveValue("gpt-4.1-mini");
+  await expect(dialog.getByRole("note")).toContainText(
+    "OpenAI text generation uses paid API credits",
+  );
+  await dialog.getByLabel("Step name").fill("Caption test");
+  await dialog.getByRole("button", { name: "Save step" }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(state.chains[0].steps[0]).toMatchObject({
+    model: "gpt-4.1-mini",
+    model_provider: "openai",
+  });
+  await page.locator(".step-card-body").first().click();
+  dialog = page.getByRole("dialog");
+  await dialog
+    .getByRole("combobox", { name: "Model", exact: true })
+    .selectOption(DEFAULT_TEXT_MODEL);
+  await expect(dialog.getByRole("note")).toContainText("Free tier project");
+  await dialog.getByRole("button", { name: "Save step" }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(state.chains[0].steps[0]).toMatchObject({
+    model_id: null,
+    model: DEFAULT_TEXT_MODEL,
+    model_provider: "gemini",
+    role: "system",
+  });
+});
+
+test("registered Google Gemini models can run and retain their UUID and role when edited", async ({
+  page,
+}) => {
+  const chains = fixtures();
+  chains[0].steps[0] = { ...chains[0].steps[0], model_id: ids.geminiModel };
+  chains[0].steps[1] = { ...chains[0].steps[1], model: DEFAULT_TEXT_MODEL };
+  const state = await mockApi(page, { chains });
+  await page.goto("/");
+  await openFirst(page);
+  await expect(
+    page.getByRole("button", { name: "Run chain", exact: true }),
+  ).toBeEnabled();
+  await expect(page.locator(".step-card").first()).toContainText(
+    "Gemini 3.5 Flash Lite",
+  );
+  await expect(page.locator(".step-model-warning")).toHaveCount(0);
+  await page.locator(".step-card-body").first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Model assignment")).toHaveValue(
+    ids.geminiModel,
+  );
+  await expect(dialog.getByLabel("Prompt role")).toHaveValue("system");
+  await expect(dialog.getByRole("note")).toContainText("Free tier project");
+  await dialog.getByLabel("Step name").fill("Keep the Google model");
+  await dialog.getByRole("button", { name: "Save step" }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(state.chains[0].steps[0]).toMatchObject({
+    model_id: ids.geminiModel,
+    model: "models/gemini-3.5-flash-lite",
+    model_provider: "gemini",
+    generation_ready: true,
+    role: "system",
+  });
+  await page.getByRole("button", { name: "Run chain", exact: true }).click();
+  const runDialog = page.getByRole("dialog");
+  await expect(runDialog.getByRole("note")).toContainText(
+    "This chain uses Gemini",
+  );
+  await expect(runDialog.getByRole("note")).toContainText(
+    "Free tier Google AI Studio project",
+  );
+  await runDialog.getByLabel("Your input").fill("A cat wearing sunglasses");
+  await runDialog
+    .getByRole("button", { name: "Run chain", exact: true })
+    .click();
+  await expect(page.locator(".run-card")).toHaveCount(1);
+  expect(state.runs[0].input).toBe("A cat wearing sunglasses");
+});
+
+test("editing preserves a supported Gemini fallback outside the suggested model choices", async ({
+  page,
+}) => {
+  const chains = fixtures();
+  chains[0].steps[0] = {
+    ...chains[0].steps[0],
+    model: "models/gemini-3.5-flash-lite",
+  };
+  const state = await mockApi(page, { chains });
+  await page.goto("/");
+  await openFirst(page);
+  await page.locator(".step-card-body").first().click();
+  const dialog = page.getByRole("dialog");
+  await expect(
+    dialog.getByRole("combobox", { name: "Model", exact: true }),
+  ).toHaveValue("gemini-3.5-flash-lite");
+  await dialog.getByLabel("Step name").fill("Keep this Gemini version");
+  await dialog.getByRole("button", { name: "Save step" }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(state.chains[0].steps[0]).toMatchObject({
+    model_id: null,
+    model: "gemini-3.5-flash-lite",
+    model_provider: "gemini",
+  });
 });
 
 test("an assigned registry model and prompt role survive editing until explicitly changed", async ({
@@ -515,14 +687,14 @@ test("an unknown assigned model remains editable when the registry cannot load",
   ).toMatchObject({ model_id: ids.unknownModel, model: "", role: "system" });
 });
 
-test("choosing an image registry assignment updates output type and preserves its UUID", async ({
+test("registry assignments infer image and Gemini text output types while preserving UUIDs", async ({
   page,
 }) => {
   const state = await mockApi(page);
   await page.goto("/");
   await openFirst(page);
   await page.getByRole("button", { name: "Add a step" }).click();
-  const dialog = page.getByRole("dialog");
+  let dialog = page.getByRole("dialog");
   await dialog.getByLabel("Step name").fill("Assigned image step");
   await dialog.getByLabel("Model assignment").selectOption(ids.imageModel);
   await expect(dialog.getByLabel("Output type")).toHaveValue("image");
@@ -537,6 +709,22 @@ test("choosing an image registry assignment updates output type and preserves it
     model_id: ids.imageModel,
     model: "gpt-image-1",
     kind: "image",
+    generation_ready: true,
+  });
+  await page.locator(".step-card-body").last().click();
+  dialog = page.getByRole("dialog");
+  await expect(dialog.getByLabel("Output type")).toHaveValue("image");
+  await dialog.getByLabel("Model assignment").selectOption(ids.geminiModel);
+  await expect(dialog.getByLabel("Output type")).toHaveValue("text");
+  await expect(dialog.getByRole("note")).toContainText("Free tier project");
+  await dialog.getByRole("button", { name: "Save step" }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(state.chains[0].steps[2]).toMatchObject({
+    role: "user",
+    model_id: ids.geminiModel,
+    model: "models/gemini-3.5-flash-lite",
+    model_provider: "gemini",
+    kind: "text",
     generation_ready: true,
   });
 });
@@ -641,6 +829,9 @@ test("running a chain sends input, shows outputs, and exposes history in the med
   await openFirst(page);
   await page.getByRole("button", { name: "Run chain", exact: true }).click();
   const dialog = page.getByRole("dialog");
+  await expect(dialog.getByRole("note")).toContainText(
+    "This chain includes OpenAI steps. They require paid API credits",
+  );
   await dialog
     .getByLabel("Your input")
     .fill("A very serious cat in a tiny hat");

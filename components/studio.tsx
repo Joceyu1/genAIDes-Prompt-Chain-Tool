@@ -58,6 +58,14 @@ import type {
 } from "@/lib/types";
 import type { RegistryModelDescriptor } from "@/lib/existing-schema";
 import type { LegacyHistoryItem } from "@/lib/legacy-history";
+import {
+  DEFAULT_TEXT_MODEL,
+  MODEL_CHOICES,
+  getModelProvider,
+  getSupportedModelKind,
+  normalizeModelKey,
+  normalizeRegistryProvider,
+} from "@/lib/model-catalog";
 
 type Theme = "light" | "dark" | "system";
 type Section = "chains" | "media";
@@ -78,14 +86,7 @@ const date = (value: string) =>
     month: "short",
     day: "numeric",
   });
-const models = {
-  text: [
-    { value: "gpt-4.1-mini", label: "GPT-4.1 mini" },
-    { value: "gpt-4.1", label: "GPT-4.1" },
-    { value: "gpt-4o-mini", label: "GPT-4o mini" },
-  ],
-  image: [{ value: "gpt-image-1", label: "GPT Image 1" }],
-};
+const models = MODEL_CHOICES;
 function chainRunIssue(chain: PromptChain): string {
   if (!chain.steps.length) return "Add a step before running this chain.";
   if (chain.steps.length > 10)
@@ -100,21 +101,21 @@ const exampleSteps = [
     prompt:
       "Describe the image in detail. Focus on the subject, setting, and anything unusual.",
     kind: "text",
-    model: "gpt-4.1-mini",
+    model: DEFAULT_TEXT_MODEL,
   },
   {
     name: "Find the funny side",
     prompt:
       "Find a funny, unexpected observation about this description: {{previous}}",
     kind: "text",
-    model: "gpt-4.1-mini",
+    model: DEFAULT_TEXT_MODEL,
   },
   {
     name: "Write five captions",
     prompt:
       "Write five short, funny social media captions based on this observation: {{previous}}. Return a numbered list.",
     kind: "text",
-    model: "gpt-4.1-mini",
+    model: DEFAULT_TEXT_MODEL,
   },
 ];
 
@@ -1538,11 +1539,12 @@ function StepDialog({
   const [kind, setKind] = useState<StepKind>(step?.kind || "text");
   const [role, setRole] = useState(step ? (step.role ?? "") : "user");
   const [modelId, setModelId] = useState<string | null>(step?.model_id ?? null);
-  const [fallbackModel, setFallbackModel] = useState(() => {
+  const [fallbackModel, setFallbackModel] = useState<string>(() => {
     const choices = models[step?.kind || "text"];
     return (
-      choices.find((choice) => choice.value === step?.model)?.value ||
-      choices[0].value
+      (step && getSupportedModelKind(step.model) === step.kind
+        ? normalizeModelKey(step.model)
+        : undefined) || choices[0].value
     );
   });
   const [registryModels, setRegistryModels] = useState<
@@ -1553,12 +1555,20 @@ function StepDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const selectedModel = registryModels.find((choice) => choice.id === modelId);
+  const selectedProvider =
+    modelId === null
+      ? getModelProvider(fallbackModel)
+      : selectedModel
+        ? normalizeRegistryProvider(selectedModel.provider)
+        : step?.model_provider;
   const assignedModelUnavailable =
     modelId !== null &&
     (selectedModel
       ? selectedModel.active === false ||
-        selectedModel.provider.toLowerCase() !== "openai" ||
-        !models[kind].some((choice) => choice.value === selectedModel.model) ||
+        normalizeRegistryProvider(selectedModel.provider) === undefined ||
+        getModelProvider(selectedModel.model) !==
+          normalizeRegistryProvider(selectedModel.provider) ||
+        getSupportedModelKind(selectedModel.model) !== kind ||
         (selectedModel.kind !== undefined && selectedModel.kind !== kind)
       : modelId !== step?.model_id || step?.generation_ready !== true);
   useEffect(() => {
@@ -1687,10 +1697,13 @@ function StepDialog({
               const nextId = e.target.value || null;
               setModelId(nextId);
               const choice = registryModels.find((item) => item.id === nextId);
-              if (choice?.kind) setKind(choice.kind);
+              const choiceKind =
+                choice?.kind ??
+                (choice ? getSupportedModelKind(choice.model) : undefined);
+              if (choiceKind) setKind(choiceKind);
               if (
                 nextId === null &&
-                !models[kind].some((item) => item.value === fallbackModel)
+                getSupportedModelKind(fallbackModel) !== kind
               )
                 setFallbackModel(models[kind][0].value);
             }}
@@ -1710,6 +1723,11 @@ function StepDialog({
                 }
               >
                 {choice.label}
+                {normalizeRegistryProvider(choice.provider) === "openai"
+                  ? " · OpenAI paid API"
+                  : normalizeRegistryProvider(choice.provider) === "gemini"
+                    ? " · Google"
+                    : ""}
                 {choice.active === false ? " (inactive)" : ""}
               </option>
             ))}
@@ -1734,6 +1752,10 @@ function StepDialog({
               value={fallbackModel}
               onChange={(e) => setFallbackModel(e.target.value)}
             >
+              {!models[kind].some((choice) => choice.value === fallbackModel) &&
+                getSupportedModelKind(fallbackModel) === kind && (
+                  <option value={fallbackModel}>{fallbackModel}</option>
+                )}
               {models[kind].map((choice) => (
                 <option key={choice.value} value={choice.value}>
                   {choice.label}
@@ -1741,6 +1763,19 @@ function StepDialog({
               ))}
             </select>
           </label>
+        )}
+        {selectedProvider === "gemini" && kind === "text" && (
+          <p className="field-note provider-cost-note" role="note">
+            Use a Google AI Studio key from a Free tier project. Gemini free
+            tier availability and usage limits vary by account, model, and
+            region.
+          </p>
+        )}
+        {selectedProvider === "openai" && (
+          <p className="field-note provider-cost-note" role="note">
+            OpenAI {kind === "image" ? "image" : "text"} generation uses paid
+            API credits, billed separately from ChatGPT subscriptions.
+          </p>
         )}
         <label className="form-field">
           Prompt
@@ -1811,6 +1846,11 @@ function RunDialog({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const runIssue = chainRunIssue(chain);
+  const providers = new Set(
+    chain.steps.map(
+      (step) => step.model_provider ?? getModelProvider(step.model),
+    ),
+  );
   async function selectFile(file?: File) {
     if (!file) return;
     if (!["image/jpeg", "image/png", "image/webp"].includes(file.type)) {
@@ -1873,6 +1913,17 @@ function RunDialog({
         <p className="modal-subtitle">
           {chain.name} · {chain.steps.length} connected steps
         </p>
+        {providers.has("openai") ? (
+          <p className="field-note provider-cost-note" role="note">
+            This chain includes OpenAI steps. They require paid API credits,
+            billed separately from ChatGPT subscriptions.
+          </p>
+        ) : providers.has("gemini") ? (
+          <p className="field-note provider-cost-note" role="note">
+            This chain uses Gemini. Use a Free tier Google AI Studio project;
+            availability and usage limits apply.
+          </p>
+        ) : null}
         {runIssue && (
           <p className="chain-run-warning" role="status">
             {runIssue}

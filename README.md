@@ -1,6 +1,6 @@
 # Chainlab — genAIDes Prompt Chain Tool
 
-A private prompt chain studio for superadmins. Built with Next.js, React, TypeScript, Supabase Auth/Postgres/Storage, and OpenAI.
+A private prompt chain studio for superadmins. Built with Next.js, React, TypeScript, Supabase Auth/Postgres/Storage, Google Gemini, and optional OpenAI generation.
 
 ## Features
 
@@ -19,11 +19,11 @@ Requires Node.js 24 and npm. Use the existing checkout; a separate Git worktree 
 ```bash
 npm ci
 cp .env.example .env.local
-# Fill in NEXT_PUBLIC_SUPABASE_ANON_KEY and AI_API_KEY securely.
+# Fill in NEXT_PUBLIC_SUPABASE_ANON_KEY and GEMINI_API_KEY securely.
 npm run dev
 ```
 
-The public Supabase project is `https://qrgjqpdvvbwmjpthpmlo.supabase.co`. Set the same configuration in Vercel before deploying. No service-role key is used by the application. The public key can also be supplied as `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`.
+The public Supabase project is `https://qrgjqpdvvbwmjpthpmlo.supabase.co`. Set the same configuration in Vercel before deploying. No service-role key is used by the application. The public key can also be supplied as `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`. Server-side Gemini calls require network access to `generativelanguage.googleapis.com`; explicitly selected OpenAI models require `api.openai.com`.
 
 ## Database setup
 
@@ -31,9 +31,11 @@ The linked shared project already has assignment chain tables. Run [supabase/ins
 
 The installer uses one transaction and aborts on incompatible tables or conflicting Chainlab objects. If the earlier authorization-only repair is already installed, its definition and owner must pass the installer's checks; the function is not replaced. After a successful installation, use reviewed incremental migrations instead of rerunning the installer. Do not run every file in the migrations directory: the older `setup.sql` and `20261102000000_prompt_chains.sql` describe a different initial schema and are retained as historical references, not the current installation path.
 
+For an installation created before Gemini support, run [supabase/enable-gemini.sql](supabase/enable-gemini.sql) once to allow Gemini workspace models. This guarded upgrade changes only the reviewed Chainlab step-update function. Existing registry assignments retain their UUIDs; choosing a different provider is explicit.
+
 The API calls the no-argument `chainlab_is_superadmin()` function to check the authenticated user's own flag. This function returns only a boolean and is executable by authenticated users only. It uses a fixed search path and a trusted database owner so a separate application's restrictive domain policy cannot hide an already-approved superadmin flag. Existing policies such as `columbia_profiles_guard` continue to govern direct profile reads; the app does not remove or weaken them. No service-role credential is used by the application.
 
-Regenerate the current installer with `node scripts/build-supabase-setup.mjs --existing`. Add `--check` to detect a stale artifact. The `--repair` mode generates the smaller authorization-only repair; it does not install chain editing or generation history.
+Regenerate the current installer with `node scripts/build-supabase-setup.mjs --existing`. Add `--check` to detect a stale artifact. Use `--gemini` to regenerate the Gemini upgrade. The `--repair` mode generates the smaller authorization-only repair; it does not install chain editing or generation history.
 
 With `SUPABASE_ACCESS_TOKEN` supplied securely, the optional Management API helper inspects schema metadata without reading application rows:
 
@@ -57,7 +59,9 @@ For local development, also allow `http://localhost:3000/auth/callback`. Preview
 
 Editing follows the existing assignment limits: chain names up to 120 characters, descriptions and step templates up to 2,000 characters, and up to 1,000 step positions. Reordering preserves step IDs and the existing unique position constraint. A chain occupying all 1,000 positions needs one step removed before a nontrivial reorder.
 
-Text models: `gpt-4.1-mini`, `gpt-4.1`, and `gpt-4o-mini`. Image model: `gpt-image-1`. Existing registry assignments retain their UUIDs and roles. Models from other providers, inactive models, and unsupported model keys remain editable but cannot run through this OpenAI integration. A step without a registry assignment can use a supported workspace fallback model. The account behind `AI_API_KEY` needs access to the selected model and available quota. Calls incur provider usage costs. Uploaded images can be analyzed by text steps; image steps create or edit images, which can feed subsequent steps.
+New text steps default to Gemini Flash Lite's current alias, `gemini-flash-lite-latest`. Supported Gemini Flash and Flash Lite registry assignments can also run, including steps that describe an uploaded image. Create a key in [Google AI Studio](https://aistudio.google.com/api-keys), select a project on its Free tier, and save the key as server-only `GEMINI_API_KEY` in Vercel Production. `GOOGLE_API_KEY` is accepted as a fallback. Google's free-tier availability and quotas depend on the account, region, project, and model; a free-tier quota error requires checking those settings. A model alias alone does not establish eligibility.
+
+OpenAI text options remain `gpt-4.1-mini`, `gpt-4.1`, and `gpt-4o-mini`; OpenAI image creation/editing uses `gpt-image-1`. These explicitly selected models need a funded OpenAI API account and server-only `AI_API_KEY` or `OPENAI_API_KEY`. Gemini handles text output, including image analysis; generated image output uses the paid OpenAI integration. Existing model choices, registry UUIDs, and prompt roles are preserved. Unsupported or inactive assignments remain editable but cannot run. Each step uses its selected provider's key; a failed Gemini request never falls back to a paid OpenAI request.
 
 OpenAI API usage is billed separately from ChatGPT subscriptions. If generation reports an exhausted quota, check [API Billing](https://platform.openai.com/settings/organization/billing/overview), available credits, and the account's usage limits. For a request rate limit, wait before retrying. The app distinguishes recognized quota and rate-limit responses; unrecognized responses use a general limit message. Raw provider error messages, which can contain prompts or credentials, are never shown or saved.
 

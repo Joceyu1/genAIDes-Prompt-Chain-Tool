@@ -274,7 +274,7 @@ if (deploy) {
   const required = [
     ["NEXT_PUBLIC_SUPABASE_URL"],
     ["NEXT_PUBLIC_SUPABASE_ANON_KEY", "NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY"],
-    ["AI_API_KEY", "OPENAI_API_KEY"],
+    ["GEMINI_API_KEY", "GOOGLE_API_KEY", "AI_API_KEY", "OPENAI_API_KEY"],
   ];
   const missing = required.filter(
     (group) => !group.some((key) => productionKeys.has(key)),

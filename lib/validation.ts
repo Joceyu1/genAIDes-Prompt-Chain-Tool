@@ -1,6 +1,6 @@
 import { z } from "zod";
-export const TEXT_MODELS = ["gpt-4.1-mini", "gpt-4.1", "gpt-4o-mini"] as const;
-export const IMAGE_MODELS = ["gpt-image-1"] as const;
+import { getSupportedModelKind } from "./model-catalog";
+export { TEXT_MODELS, IMAGE_MODELS } from "./model-catalog";
 export const uuid = z.string().uuid();
 const chainFields = z
   .object({
@@ -31,9 +31,7 @@ const stepFields = z
   })
   .strict();
 function validateFallback(v: z.infer<typeof stepFields>, ctx: z.RefinementCtx) {
-  const models: readonly string[] =
-    v.kind === "text" ? TEXT_MODELS : IMAGE_MODELS;
-  if (!models.includes(v.model))
+  if (getSupportedModelKind(v.model) !== v.kind)
     ctx.addIssue({
       code: "custom",
       path: ["model"],

@@ -360,3 +360,360 @@ describe("safe provider 429 classification", () => {
     expect(getReader).not.toHaveBeenCalled();
   });
 });
+
+function geminiGenerate(
+  overrides: Partial<ChainStep> = {},
+  withImage = false,
+  signal = new AbortController().signal,
+) {
+  return generateStep({
+    apiKey: "gemini-test-key",
+    step: {
+      ...step,
+      model: "gemini-flash-lite-latest",
+      model_provider: "gemini",
+      ...overrides,
+    },
+    prompt: "Describe the input",
+    previous: "A cat wearing a hat",
+    ...(withImage ? { image } : {}),
+    signal,
+  });
+}
+const geminiResult = (parts: unknown[] = [{ text: "A stylish cat" }]) => ({
+  candidates: [{ finishReason: "STOP", content: { role: "model", parts } }],
+});
+
+describe("explicit Gemini text generation", () => {
+  beforeEach(() => fetchMock.mockResolvedValue(Response.json(geminiResult())));
+  it("uses the fixed Google endpoint and API-key header with no bearer or query-string credentials", async () => {
+    await expect(
+      geminiGenerate({ model: "models/gemini-flash-lite-latest" }),
+    ).resolves.toEqual({ kind: "text", text: "A stylish cat" });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://generativelanguage.googleapis.com/v1/models/gemini-flash-lite-latest:generateContent",
+    );
+    const options = fetchMock.mock.calls[0][1];
+    expect(options.headers).toEqual({
+      "Content-Type": "application/json",
+      "x-goog-api-key": "gemini-test-key",
+    });
+    expect(sentBody()).toMatchObject({
+      contents: [
+        {
+          role: "user",
+          parts: [
+            {
+              text: "Describe the input\n\nInput from the previous step:\nA cat wearing a hat",
+            },
+          ],
+        },
+      ],
+      generationConfig: { maxOutputTokens: 1200 },
+    });
+    expect(sentBody()).not.toHaveProperty("systemInstruction");
+  });
+  it("keeps system instructions separate and image inline data in user content", async () => {
+    await geminiGenerate({ role: "system" }, true);
+    expect(sentBody()).toEqual({
+      systemInstruction: { parts: [{ text: "Describe the input" }] },
+      contents: [
+        {
+          role: "user",
+          parts: [
+            { text: "Input from the previous step:\nA cat wearing a hat" },
+            { inlineData: { mimeType: "image/png", data: "cG5n" } },
+          ],
+        },
+      ],
+      generationConfig: { maxOutputTokens: 1200 },
+    });
+  });
+  it("maps assistant prompts to a prior model turn in a valid user-first conversation", async () => {
+    await geminiGenerate({ role: "assistant" }, true);
+    expect(sentBody().contents).toEqual([
+      {
+        role: "user",
+        parts: [
+          { text: "Input from the previous step:\nA cat wearing a hat" },
+          { inlineData: { mimeType: "image/png", data: "cG5n" } },
+        ],
+      },
+      { role: "model", parts: [{ text: "Describe the input" }] },
+      {
+        role: "user",
+        parts: [
+          {
+            text: "Continue from the assistant response above and return the final result for this step.",
+          },
+        ],
+      },
+    ]);
+  });
+  it("joins visible text parts from the first candidate while excluding thoughts and non-text parts", async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        candidates: [
+          ...geminiResult([
+            { text: "private reasoning", thought: true },
+            { text: "A stylish" },
+            { inlineData: { mimeType: "image/png", data: "ignored" } },
+            null,
+            { text: " cat", thought: false },
+          ]).candidates,
+          { content: { parts: [{ text: "Not the selected candidate" }] } },
+        ],
+      }),
+    );
+    await expect(geminiGenerate()).resolves.toEqual({
+      kind: "text",
+      text: "A stylish cat",
+    });
+  });
+  it.each([
+    "SAFETY",
+    "BLOCKLIST",
+    "PROHIBITED_CONTENT",
+    "SPII",
+    "IMAGE_SAFETY",
+    "RECITATION",
+  ])(
+    "does not record a %s-blocked candidate as completed",
+    async (finishReason) => {
+      fetchMock.mockResolvedValue(
+        Response.json({
+          candidates: [
+            {
+              finishReason,
+              content: {
+                parts: [{ text: "This partial output must not be returned" }],
+              },
+            },
+          ],
+        }),
+      );
+      await expect(geminiGenerate()).rejects.toThrow(
+        "Gemini blocked this output",
+      );
+    },
+  );
+  it("does not expose prompt-feedback block details", async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        ...geminiResult(),
+        promptFeedback: {
+          blockReason: "SAFETY",
+          blockReasonMessage: "private prompt and provider detail",
+        },
+      }),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(
+        "Gemini blocked this prompt or image. Adjust the input and try again.",
+      ),
+    );
+  });
+  it.each([
+    { parts: [] },
+    { parts: [{ thought: true, text: "Private reasoning only" }] },
+    { parts: [{ text: "  " }] },
+  ])("rejects empty or thought-only final text (%j)", async ({ parts }) => {
+    fetchMock.mockResolvedValue(Response.json(geminiResult(parts)));
+    await expect(geminiGenerate()).rejects.toThrow("returned no final text");
+  });
+  it.each([undefined, ""])(
+    "requires explicit completion metadata before recording output (%j)",
+    async (finishReason) => {
+      fetchMock.mockResolvedValue(
+        Response.json({
+          candidates: [
+            {
+              finishReason,
+              content: { parts: [{ text: "Possibly incomplete output" }] },
+            },
+          ],
+        }),
+      );
+      await expect(geminiGenerate()).rejects.toThrow(
+        "stopped before completing",
+      );
+    },
+  );
+  it("does not claim a truncated candidate completed successfully", async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({
+        candidates: [
+          {
+            finishReason: "MAX_TOKENS",
+            content: { parts: [{ text: "Partial caption" }] },
+          },
+        ],
+      }),
+    );
+    await expect(geminiGenerate()).rejects.toThrow("stopped before completing");
+  });
+  it.each([
+    { model: "https://untrusted.example/gemini-flash-lite-latest" },
+    { model: "gpt-4.1-mini", model_provider: "gemini" as const },
+    { model: "gemini-flash-lite-latest", model_provider: "openai" as const },
+    { kind: "image" as const },
+    { role: "developer" },
+  ])(
+    "rejects unsupported model, provider, output or role before any request (%j)",
+    async (overrides) => {
+      await expect(geminiGenerate(overrides)).rejects.toBeInstanceOf(
+        GenerationError,
+      );
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+  it("rejects URL image inputs instead of causing server-side image fetches", async () => {
+    await expect(
+      generateStep({
+        apiKey: "gemini-test-key",
+        step: { ...step, model: "gemini-flash-lite-latest" },
+        prompt: "Describe",
+        previous: "",
+        image: "https://untrusted.example/image.png",
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("Upload a PNG, JPEG or WebP");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("private Gemini provider errors without paid fallback", () => {
+  const secret = "private-prompt-and-key-never-exposed";
+  it.each([401, 403])(
+    "reports HTTP %s key/permission failures without exposing the response",
+    async (status) => {
+      fetchMock.mockResolvedValue(
+        Response.json(
+          {
+            error: {
+              code: status,
+              status: "PERMISSION_DENIED",
+              message: secret,
+            },
+          },
+          { status },
+        ),
+      );
+      await expect(geminiGenerate()).rejects.toThrow(
+        new GenerationError(
+          "The Gemini API key was rejected or lacks permission for this model. Ask your administrator to check the Gemini key and project access.",
+        ),
+      );
+      expect(fetchMock).toHaveBeenCalledOnce();
+    },
+  );
+  it("makes an unavailable model actionable without exposing provider details", async () => {
+    fetchMock.mockResolvedValue(
+      Response.json({ error: { message: secret } }, { status: 404 }),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(
+        "The selected Gemini model is unavailable. Choose another supported Gemini model or check this project's model access.",
+      ),
+    );
+  });
+  it.each([{ status: "RESOURCE_EXHAUSTED" }, { code: 429 }])(
+    "uses exact structured quota/rate codes without treating unavailable free quota as billing proof (%j)",
+    async (error) => {
+      fetchMock.mockResolvedValueOnce(
+        Response.json(
+          {
+            error: {
+              ...error,
+              message: secret,
+              details: [
+                {
+                  "@type": "type.googleapis.com/google.rpc.QuotaFailure",
+                  violations: [
+                    { quotaValue: "0", description: secret, quotaId: secret },
+                  ],
+                },
+              ],
+            },
+          },
+          { status: 429 },
+        ),
+      );
+      const failure = await geminiGenerate().catch((error) => error);
+      expect(failure.message).toBe(
+        "The Gemini API quota or rate limit was reached. Check this project's quota and free-tier availability in Google AI Studio, then retry when quota is available.",
+      );
+      expect(failure.message).not.toMatch(/billing|payment|credit/);
+      expect(failure.message).not.toContain(secret);
+      expect(fetchMock).toHaveBeenCalledOnce();
+      expect(fetchMock.mock.calls[0][0]).toContain(
+        "generativelanguage.googleapis.com",
+      );
+    },
+  );
+  it("keeps unknown or message-only codes neutral", async () => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          error: {
+            status: "resource_exhausted",
+            message: "RESOURCE_EXHAUSTED " + secret,
+          },
+        },
+        { status: 429 },
+      ),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(
+        "The Gemini API is busy or its quota was reached. Try again later.",
+      ),
+    );
+  });
+  it("keeps malformed quota JSON neutral", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        `{"error":{"status":"RESOURCE_EXHAUSTED","message":"${secret}`,
+        { status: 429 },
+      ),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(
+        "The Gemini API is busy or its quota was reached. Try again later.",
+      ),
+    );
+  });
+  it("bounds the actual quota response stream even when Content-Length is false", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          error: {
+            code: 429,
+            status: "RESOURCE_EXHAUSTED",
+            message: secret.repeat(1000),
+          },
+        }),
+        { status: 429, headers: { "content-length": "1" } },
+      ),
+    );
+    await expect(geminiGenerate()).rejects.toThrow(
+      new GenerationError(
+        "The Gemini API is busy or its quota was reached. Try again later.",
+      ),
+    );
+  });
+  it("preserves quota-body timeout cancellation instead of replacing it with quota guidance", async () => {
+    const abort = new AbortController();
+    const failure = new DOMException("Generation timed out", "TimeoutError");
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull() {
+          abort.abort(failure);
+        },
+      },
+      { highWaterMark: 0 },
+    );
+    fetchMock.mockResolvedValue(new Response(body, { status: 429 }));
+    await expect(geminiGenerate({}, false, abort.signal)).rejects.toBe(failure);
+  });
+});

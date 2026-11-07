@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DEFAULT_TEXT_MODEL } from "../lib/model-catalog";
 import {
   adaptExistingChain,
   adaptExistingStep,
@@ -181,14 +182,54 @@ describe("adapting the existing shared prompt chain tables", () => {
     });
   });
 
+  it("uses an existing Google registry assignment without changing its UUID or role", () => {
+    expect(
+      adaptExistingStep(step, {
+        model: {
+          ...model,
+          provider: "google-ai-studio",
+          model: "models/gemini-3.5-flash-lite",
+          kind: undefined,
+          label: "Gemini 3.5 Flash Lite",
+        },
+      }),
+    ).toMatchObject({
+      model_id: step.model_id,
+      role: "system",
+      model: "models/gemini-3.5-flash-lite",
+      model_provider: "gemini",
+      kind: "text",
+      generation_ready: true,
+    });
+  });
+
+  it("keeps provider identity authoritative even for recognized Gemini model names", () => {
+    for (const provider of ["openai", "unrecognized-google-proxy"])
+      expect(
+        adaptExistingStep(step, {
+          model: { ...model, provider, model: DEFAULT_TEXT_MODEL },
+        }).generation_ready,
+      ).toBe(false);
+    expect(
+      adaptExistingStep(step, {
+        model: {
+          ...model,
+          provider: "google",
+          model: DEFAULT_TEXT_MODEL,
+          active: false,
+        },
+      }).generation_ready,
+    ).toBe(false);
+  });
+
   it.each([
-    { settings: undefined, kind: "text", model: "gpt-4.1-mini" },
+    { settings: undefined, kind: "text", model: DEFAULT_TEXT_MODEL },
     { settings: { kind: "image" }, kind: "image", model: "gpt-image-1" },
     { settings: { fallback_model: "gpt-4.1" }, kind: "text", model: "gpt-4.1" },
     {
       settings: { fallback_model: "unknown" },
       kind: "text",
-      model: "gpt-4.1-mini",
+      model: DEFAULT_TEXT_MODEL,
     },
     {
       settings: { kind: "image", fallback_model: "gpt-4.1" },
@@ -222,6 +263,31 @@ describe("adapting the existing shared prompt chain tables", () => {
       adaptExistingStep(step, { settings: { step_id: step.id, name: "  " } })
         .name,
     ).toBe("Step 12");
+  });
+
+  it("preserves a stored OpenAI fallback and normalizes an explicitly chosen Gemini fallback", () => {
+    expect(
+      adaptExistingStep(
+        { ...step, model_id: null },
+        {
+          settings: {
+            step_id: step.id,
+            fallback_model: "gpt-4.1-mini",
+            kind: "text",
+          },
+        },
+      ),
+    ).toMatchObject({
+      model: "gpt-4.1-mini",
+      model_provider: "openai",
+      generation_ready: true,
+    });
+    expect(
+      mapStepPatch({ model: "models/gemini-3.5-flash-lite", model_id: null }),
+    ).toEqual({
+      step: { model_id: null },
+      settings: { fallback_model: "gemini-3.5-flash-lite" },
+    });
   });
 
   it("rejects mismatched or duplicate metadata IDs instead of applying another row's data", () => {

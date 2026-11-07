@@ -1,5 +1,12 @@
 import type { ChainStep, PromptChain, StepKind } from "./types";
-import { IMAGE_MODELS, TEXT_MODELS } from "./validation";
+import {
+  DEFAULT_TEXT_MODEL,
+  getModelProvider,
+  getSupportedModelKind,
+  normalizeModelKey,
+  normalizeRegistryProvider,
+  type GenerationProvider,
+} from "./model-catalog";
 
 /** The existing shared tables, without app-specific columns or defaults. */
 export interface ExistingPromptChainRecord {
@@ -52,11 +59,6 @@ export interface ExistingChainAdaptation {
   models?: readonly RegistryModelDescriptor[];
 }
 
-function supportedModelKind(model: string): StepKind | undefined {
-  if ((TEXT_MODELS as readonly string[]).includes(model)) return "text";
-  if ((IMAGE_MODELS as readonly string[]).includes(model)) return "image";
-}
-
 export function adaptExistingStep(
   record: ExistingChainStepRecord,
   { settings, model }: ExistingStepAdaptation = {},
@@ -69,7 +71,7 @@ export function adaptExistingStep(
   const kind =
     settings?.kind ??
     model?.kind ??
-    (model ? supportedModelKind(model.model) : undefined) ??
+    (model ? getSupportedModelKind(model.model) : undefined) ??
     "text";
   const name = settings?.name?.trim()
     ? settings.name
@@ -77,25 +79,29 @@ export function adaptExistingStep(
   let providerModel = "";
   let modelLabel = "Assigned model";
   let generationReady = false;
+  let modelProvider: GenerationProvider | undefined;
 
   if (record.model_id === null) {
     // A fallback never replaces an assigned registry UUID.
     const fallback = settings?.fallback_model;
     providerModel =
-      fallback && supportedModelKind(fallback) === kind
-        ? fallback
+      fallback && getSupportedModelKind(fallback) === kind
+        ? normalizeModelKey(fallback)
         : kind === "image"
           ? "gpt-image-1"
-          : "gpt-4.1-mini";
+          : DEFAULT_TEXT_MODEL;
     modelLabel = providerModel;
+    modelProvider = getModelProvider(providerModel);
     generationReady = true;
   } else if (model) {
     providerModel = model.model;
     modelLabel = model.label;
+    modelProvider = normalizeRegistryProvider(model.provider);
     generationReady =
       model.active !== false &&
-      model.provider.toLowerCase() === "openai" &&
-      supportedModelKind(providerModel) === kind &&
+      modelProvider !== undefined &&
+      getModelProvider(providerModel) === modelProvider &&
+      getSupportedModelKind(providerModel) === kind &&
       (model.kind === undefined || model.kind === kind);
   }
 
@@ -112,6 +118,7 @@ export function adaptExistingStep(
     kind,
     model: providerModel,
     model_label: modelLabel,
+    model_provider: modelProvider,
     generation_ready: generationReady,
   };
 }
@@ -198,6 +205,7 @@ export function mapStepPatch(patch: CanonicalStepPatch): ExistingStepPatch {
   if (patch.model_id !== undefined) step.model_id = patch.model_id;
   if (patch.name !== undefined) settings.name = patch.name;
   if (patch.kind !== undefined) settings.kind = patch.kind;
-  if (patch.model !== undefined) settings.fallback_model = patch.model;
+  if (patch.model !== undefined)
+    settings.fallback_model = normalizeModelKey(patch.model);
   return { step, settings };
 }

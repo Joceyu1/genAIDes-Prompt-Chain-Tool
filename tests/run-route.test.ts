@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ChainRun, ChainStep } from "../lib/types";
 const mocks = vi.hoisted(() => ({
   auth: vi.fn(),
@@ -124,10 +124,14 @@ const request = () =>
 const context = () => ({ params: Promise.resolve({ id: chainId }) });
 beforeEach(() => {
   vi.stubEnv("AI_API_KEY", "test-provider-key");
+  vi.stubEnv("OPENAI_API_KEY", "");
+  vi.stubEnv("GEMINI_API_KEY", "");
+  vi.stubEnv("GOOGLE_API_KEY", "");
   mocks.auth.mockReset();
   mocks.generate.mockReset();
   mocks.models.mockReset().mockResolvedValue([]);
 });
+afterEach(() => vi.unstubAllEnvs());
 describe("persistent sequential run endpoint", () => {
   it("uses existing-schema RPCs, passes each output into the next step, and saves completion", async () => {
     const { db, updates, upload } = database([
@@ -294,5 +298,95 @@ describe("persistent sequential run endpoint", () => {
     expect((await POST(request(), context())).status).toBe(403);
     expect(mocks.models).not.toHaveBeenCalled();
     expect(mocks.generate).not.toHaveBeenCalled();
+  });
+});
+
+describe("provider-specific credentials before any generation work", () => {
+  const geminiStep = (index = 1): ChainStep => ({
+    ...makeStep(index, "Describe {{previous}}"),
+    model: "gemini-flash-lite-latest",
+  });
+  function expectNoRun(
+    db: ReturnType<typeof database>["db"],
+    storageFrom: ReturnType<typeof database>["storageFrom"],
+  ) {
+    expect(mocks.generate).not.toHaveBeenCalled();
+    expect(storageFrom).not.toHaveBeenCalled();
+    expect(
+      db.rpc.mock.calls.some(([name]) => name === "chainlab_create_run"),
+    ).toBe(false);
+  }
+  it("does not reuse an OpenAI key for a Gemini step", async () => {
+    const { db, storageFrom } = database([geminiStep()]);
+    mocks.auth.mockResolvedValue({ db, user: { id: adminId } });
+    const response = await POST(request(), context());
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain("connect a Gemini API key");
+    expectNoRun(db, storageFrom);
+  });
+  it("does not reuse a Gemini key for an OpenAI step", async () => {
+    vi.stubEnv("AI_API_KEY", "");
+    vi.stubEnv("GEMINI_API_KEY", "test-gemini-key");
+    const { db, storageFrom } = database([makeStep(1, "Describe")]);
+    mocks.auth.mockResolvedValue({ db, user: { id: adminId } });
+    const response = await POST(request(), context());
+    expect(response.status).toBe(503);
+    expect((await response.json()).error).toContain(
+      "connect an OpenAI API key",
+    );
+    expectNoRun(db, storageFrom);
+  });
+  it("checks a later missing provider before probing image storage or charging an earlier step", async () => {
+    const { db, storageFrom } = database([
+      { ...makeStep(1, "Draw"), kind: "image", model: "gpt-image-1" },
+      geminiStep(2),
+    ]);
+    mocks.auth.mockResolvedValue({ db, user: { id: adminId } });
+    const response = await POST(request(), context());
+    expect(response.status).toBe(503);
+    expectNoRun(db, storageFrom);
+  });
+  it("uses each explicitly selected provider's own key for a mixed chain", async () => {
+    vi.stubEnv("GEMINI_API_KEY", "test-gemini-key");
+    const { db } = database([
+      geminiStep(),
+      makeStep(2, "Make {{previous}} funny"),
+    ]);
+    mocks.auth.mockResolvedValue({ db, user: { id: adminId } });
+    mocks.generate
+      .mockResolvedValueOnce({ kind: "text", text: "A cat" })
+      .mockResolvedValueOnce({
+        kind: "text",
+        text: "A cat with a career in hats",
+      });
+    const response = await POST(request(), context());
+    expect(response.status).toBe(201);
+    expect(mocks.generate.mock.calls[0][0]).toMatchObject({
+      apiKey: "test-gemini-key",
+      step: { model: "gemini-flash-lite-latest" },
+    });
+    expect(mocks.generate.mock.calls[1][0]).toMatchObject({
+      apiKey: "test-provider-key",
+      step: { model: "gpt-4.1-mini" },
+      previous: "A cat",
+    });
+  });
+  it("accepts the Google-key alias for Gemini without requiring OpenAI credentials", async () => {
+    vi.stubEnv("AI_API_KEY", "");
+    vi.stubEnv("GOOGLE_API_KEY", "test-google-key");
+    const { db } = database([geminiStep()]);
+    mocks.auth.mockResolvedValue({ db, user: { id: adminId } });
+    mocks.generate.mockResolvedValue({ kind: "text", text: "A cat" });
+    expect((await POST(request(), context())).status).toBe(201);
+    expect(mocks.generate.mock.calls[0][0].apiKey).toBe("test-google-key");
+  });
+  it("preserves the OpenAI-key alias for an explicitly selected OpenAI model", async () => {
+    vi.stubEnv("AI_API_KEY", "");
+    vi.stubEnv("OPENAI_API_KEY", "test-openai-key");
+    const { db } = database([makeStep(1, "Describe")]);
+    mocks.auth.mockResolvedValue({ db, user: { id: adminId } });
+    mocks.generate.mockResolvedValue({ kind: "text", text: "A cat" });
+    expect((await POST(request(), context())).status).toBe(201);
+    expect(mocks.generate.mock.calls[0][0].apiKey).toBe("test-openai-key");
   });
 });

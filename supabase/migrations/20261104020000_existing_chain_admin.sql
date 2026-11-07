@@ -194,7 +194,10 @@ begin
   if char_length(btrim(v_settings.name)) not between 1 and 120 or v_settings.kind not in ('text','image')
      or char_length(v_settings.fallback_model) not between 1 and 200 then raise exception 'Invalid step display settings' using errcode='22023';end if;
   if v_step.model_id is null and not (
-    (v_settings.kind='text' and v_settings.fallback_model in ('gpt-4.1-mini','gpt-4.1','gpt-4o-mini'))
+    (v_settings.kind='text' and (
+      v_settings.fallback_model in ('gpt-4.1-mini','gpt-4.1','gpt-4o-mini')
+      or v_settings.fallback_model ~ '^gemini-([0-9]+([.][0-9]+)?-flash(-lite)?(-(001|latest|preview(-[0-9]{2}(-[0-9]{2,4})?)?))?|flash-lite-latest)$'
+    ))
     or (v_settings.kind='image' and v_settings.fallback_model='gpt-image-1')
   ) then raise exception 'Choose a supported fallback model when no registry model is assigned' using errcode='22023';end if;
   update public.prompt_chain_steps set role=v_step.role,template=v_step.template,model_id=v_step.model_id,updated_at=now() where id=p_step_id returning * into v_step;

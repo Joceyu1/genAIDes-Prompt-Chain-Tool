@@ -9,7 +9,12 @@ import {
   supabaseServer,
 } from "@/lib/server";
 import { runSchema, generationStepSchema } from "@/lib/validation";
-import { GenerationError, generateStep, renderPrompt } from "@/lib/generation";
+import {
+  GenerationError,
+  generateStep,
+  getGenerationProvider,
+  renderPrompt,
+} from "@/lib/generation";
 import type { ChainRun, RunOutput } from "@/lib/types";
 import { randomUUID } from "node:crypto";
 import { getChain } from "@/lib/chain-store";
@@ -104,12 +109,6 @@ export const POST = route(async (request, { params }) => {
   const { db } = await requireAdmin();
   const id = parseId((await params).id);
   const body = await readBody(request, runSchema, 7_100_000);
-  const key = process.env.AI_API_KEY || process.env.OPENAI_API_KEY;
-  if (!key)
-    throw new ApiError(
-      503,
-      "Media generation is not configured yet. Ask your administrator to connect an AI provider.",
-    );
   const models = await getRegistryModels(db);
   const { steps } = await getChain(db, id, { models });
   if (!steps.length)
@@ -136,6 +135,31 @@ export const POST = route(async (request, { params }) => {
         `Check the model and prompt for step “${step.name}” before running.`,
       );
   }
+  // Resolve every step and credential before storage probes, history or any
+  // provider call. An unavailable provider never triggers a paid fallback.
+  const providerKeys = {
+    gemini: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+    openai: process.env.AI_API_KEY || process.env.OPENAI_API_KEY,
+  };
+  const preparedSteps = steps.map((step) => {
+    let provider;
+    try {
+      provider = getGenerationProvider(step);
+    } catch (error) {
+      if (error instanceof GenerationError)
+        throw new ApiError(400, error.message);
+      throw error;
+    }
+    const apiKey = providerKeys[provider];
+    if (!apiKey)
+      throw new ApiError(
+        503,
+        provider === "gemini"
+          ? "Gemini generation is not configured yet. Ask your administrator to connect a Gemini API key."
+          : "OpenAI generation is not configured yet. Ask your administrator to connect an OpenAI API key.",
+      );
+    return { step, apiKey };
+  });
   if (steps.some((step) => step.kind === "image"))
     await checkImageStorage(db, id);
   const created = await createRun(db, id, body.input || "(Image input)");
@@ -145,10 +169,10 @@ export const POST = route(async (request, { params }) => {
   let currentImage = body.image;
   const signal = AbortSignal.timeout(250_000);
   try {
-    for (const step of steps) {
+    for (const { step, apiKey } of preparedSteps) {
       const prompt = renderPrompt(step.prompt, body.input, previous, texts);
       const generated = await generateStep({
-        apiKey: key,
+        apiKey,
         step,
         prompt,
         previous,
