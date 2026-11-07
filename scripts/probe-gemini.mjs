@@ -2,6 +2,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const PROBE_MARKER = "[chainlab-gemini-probe]";
+export const LATENCY_MARKER = "[chainlab-gemini-latency]";
 export const shouldProbe = (message) =>
   typeof message === "string" && message.includes(PROBE_MARKER);
 const MODEL = "gemini-flash-lite-latest";
@@ -120,7 +121,105 @@ export async function probeGemini({ key, fetchImpl = fetch }) {
   return results;
 }
 
+/** Fixed, nonpersonal caption sample: compare latency before changing settings. */
+export async function probeGeminiLatency({
+  key,
+  fetchImpl = fetch,
+  now = Date.now,
+}) {
+  if (!key) return [{ outcome: "missing_key" }];
+  const results = [];
+  for (const mode of ["default", "thinking_off"]) {
+    const started = now();
+    const signal = AbortSignal.timeout(25000);
+    try {
+      const response = await fetchImpl(
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key,
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                role: "user",
+                parts: [
+                  {
+                    text: "Write five short, funny captions about A cat wearing sunglasses\n\nInput from the previous step:\nA cat wearing sunglasses",
+                  },
+                ],
+              },
+            ],
+            generationConfig: {
+              maxOutputTokens: 1200,
+              ...(mode === "thinking_off"
+                ? { thinkingConfig: { thinkingBudget: 0 } }
+                : {}),
+            },
+          }),
+          signal,
+        },
+      );
+      const data = await readJSON(response);
+      if (signal.aborted) {
+        results.push({
+          mode,
+          outcome: "timeout",
+          durationMs: Math.max(0, now() - started),
+        });
+        continue;
+      }
+      const candidate = data?.candidates?.[0];
+      const completed =
+        candidate?.finishReason === "STOP" &&
+        Array.isArray(candidate?.content?.parts) &&
+        candidate.content.parts.some(
+          (p) =>
+            p?.thought !== true && typeof p?.text === "string" && p.text.trim(),
+        );
+      const usage = data?.usageMetadata;
+      const metric = (value) =>
+        Number.isInteger(value) && value >= 0 && value <= 10000000;
+      results.push({
+        mode,
+        httpStatus: response.status,
+        durationMs: Math.max(0, now() - started),
+        ...(SAFE_STATUSES.has(data?.error?.status)
+          ? { status: data.error.status }
+          : {}),
+        ...(response.ok ? { completed } : {}),
+        ...(metric(usage?.thoughtsTokenCount)
+          ? { thoughtTokens: usage.thoughtsTokenCount }
+          : {}),
+        ...(metric(usage?.candidatesTokenCount)
+          ? { outputTokens: usage.candidatesTokenCount }
+          : {}),
+      });
+      if ([401, 403, 429].includes(response.status)) break;
+    } catch (error) {
+      results.push({
+        mode,
+        outcome: ["AbortError", "TimeoutError"].includes(error?.name)
+          ? "timeout"
+          : "transport_error",
+        durationMs: Math.max(0, now() - started),
+      });
+    }
+  }
+  return results;
+}
+
 async function main() {
+  if (process.env.VERCEL_GIT_COMMIT_MESSAGE?.includes(LATENCY_MARKER)) {
+    const results = await probeGeminiLatency({
+      key: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,
+    });
+    for (const result of results)
+      console.log(`CHAINLAB_GEMINI_LATENCY ${JSON.stringify(result)}`);
+    return;
+  }
   if (!shouldProbe(process.env.VERCEL_GIT_COMMIT_MESSAGE)) return;
   const results = await probeGemini({
     key: process.env.GEMINI_API_KEY || process.env.GOOGLE_API_KEY,

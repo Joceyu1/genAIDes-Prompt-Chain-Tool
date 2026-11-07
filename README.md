@@ -80,7 +80,7 @@ npm run test:e2e
 
 Unit tests validate authorization, input constraints, provider requests, and prompt substitution. Database tests exercise the actual migration in an embedded PostgreSQL engine, including RLS and role escalation denial. Browser tests use explicitly mocked APIs to verify UI workflows; they do not establish live Supabase or OpenAI connectivity.
 
-For a deliberate deployment diagnostic, a commit message containing `[chainlab-gemini-probe]` enables the guarded `prebuild` check. It uses the saved Gemini key for a tiny fixed test and reports only allowlisted status information. It compares `v1beta` only if the `v1` attempt fails, never uses OpenAI, and skips ordinary builds. Redeploying a marked commit repeats this check and uses Gemini quota. Keep Vercel system environment variables enabled for the marker to be available.
+For a deliberate deployment diagnostic, a commit message containing `[chainlab-gemini-probe]` enables a guarded `prebuild` connection check. It uses the saved Gemini key for a tiny fixed test and reports only allowlisted status information. It compares `v1beta` only if the `v1` attempt fails. The separate `[chainlab-gemini-latency]` marker compares a fixed, nonpersonal caption request with default thinking versus `thinkingBudget: 0`, reporting elapsed milliseconds and numeric token counts. These diagnostics never use OpenAI and skip ordinary builds. Redeploying a marked commit repeats its check and uses Gemini quota. Keep Vercel system environment variables enabled for the markers to be available.
 
 ## Deployment
 
